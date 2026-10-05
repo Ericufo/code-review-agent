@@ -1,44 +1,37 @@
 import sys
-from pathlib import Path
+import subprocess
 
-from reviewer import review_code
+from reviewer import review_diff
+from git_utils import get_git_diff
 
-
-def read_code(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
 
 def main() -> int:
-    print("=== Code Review Agent V0 ===")
 
-    if len(sys.argv) != 2:
-        print("Usage: python main.py <file>", file=sys.stderr)
+    if len(sys.argv) != 1:
+        print("Usage: python main.py", file=sys.stderr)
         return 2
 
-    path = Path(sys.argv[1])
-
-    if not path.exists():
-        print(f"Error: file not found: {path}", file=sys.stderr)
-        return 1
-
-    if not path.is_file():
-        print(f"Error: not a file: {path}", file=sys.stderr)
-        return 1
-
     try:
-        code = read_code(path)
-    except (OSError, UnicodeDecodeError) as error:
-        print(f"Error reading {path}: {error}", file=sys.stderr)
+        diff = get_git_diff()
+    except subprocess.CalledProcessError as exc:
+        message = exc.stderr.strip() if exc.stderr else str(exc)
+        print(f"Git error: {message}", file=sys.stderr)
         return 1
 
-    print(f"Reviewing: {path}")
-    print()
+    if not diff.strip():
+        print("No changes to review.")
+        return 0
+
+    print("=== Code Review Agent V1 ===")
+    print("Reviewing current Git changes...")
     
     try:
-        result = review_code(code)
-    except Exception as error:
-        print(f"Error: code review failed: {error}", file=sys.stderr)
+        result = review_diff(diff)
+    except Exception as exc:
+        print(f"Review failed: {exc}", file=sys.stderr)
         return 1
 
+    print()
     print("=== Review Result ===")
     print(result)
 

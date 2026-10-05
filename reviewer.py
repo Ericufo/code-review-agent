@@ -7,7 +7,7 @@ from openai import OpenAI
 load_dotenv()
 
 
-def review_code(code: str) -> str:
+def review_diff(diff: str) -> str:
     api_key = os.getenv("DEEPSEEK_API_KEY")
 
     if not api_key:
@@ -21,11 +21,13 @@ def review_code(code: str) -> str:
     response = client.responses.create(
         model="deepseek-flash",
         instructions=(
-            "You are a code reviewer. "
-            "Review the submitted code for correctness, readability, "
-            "and potential bugs. Keep the review concise."
+            "You are a code reviewer. Review the changes shown in the Git diff. "
+            "Focus on bugs, correctness issues, edge cases, maintainability, "
+            "and important engineering problems. "
+            "Distinguish added lines from removed lines and review the new behavior "
+            "rather than treating the diff as a complete source file."
         ),
-        input=f"Review this code:\n\n{code}",
+        input=f"Review this Git diff:\n\n{diff}",
     )
 
     if not response.output_text:
