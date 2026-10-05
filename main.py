@@ -3,6 +3,35 @@ import subprocess
 
 from reviewer import review_diff
 from git_utils import get_git_diff
+from review_models import ReviewResult
+
+def print_review(result: ReviewResult) -> None:
+    print()
+    print("=== Review Result ===")
+    print(result.summary)
+
+    if not result.issues:
+        print()
+        print("No issues found.")
+        return
+
+    for index, issue in enumerate(result.issues, start=1):
+        print()
+        print(
+            f"{index}. [{issue.severity.upper()}] "
+            f"{issue.title}"
+        )
+
+        location = issue.file
+
+        if issue.line is not None:
+            location += f":{issue.line}"
+
+        print(f"   Location: {location}")
+        print(f"   {issue.description}")
+
+        if issue.suggestion:
+            print(f"   Suggestion: {issue.suggestion}")
 
 
 def main() -> int:
@@ -31,9 +60,7 @@ def main() -> int:
         print(f"Review failed: {exc}", file=sys.stderr)
         return 1
 
-    print()
-    print("=== Review Result ===")
-    print(result)
+    print_review(result)
 
     return 0
 
