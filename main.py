@@ -1,9 +1,10 @@
 import sys
 import subprocess
 
-from reviewer import review_diff
 from git_utils import get_git_diff
 from review_models import ReviewResult
+from diff_parser import parse_git_diff
+from review_pipeline import review_files
 
 def print_review(result: ReviewResult) -> None:
     print()
@@ -55,12 +56,39 @@ def main() -> int:
     print("Reviewing current Git changes...")
     
     try:
-        result = review_diff(diff)
+        file_diffs = parse_git_diff(diff)
+
+        if not file_diffs:
+            print("No changed files to review.")
+            return 0
+
+        print(f"Reviewing {len(file_diffs)} changed file(s)...")
+
+        batch = review_files(file_diffs)
     except Exception as exc:
         print(f"Review failed: {exc}", file=sys.stderr)
         return 1
 
-    print_review(result)
+    print_review(batch.result)
+
+    for problem in batch.failures:
+        print(
+            f"[FAILED] {problem.path}: {problem.reason}",
+            file=sys.stderr,
+        )
+
+    for problem in batch.skipped:
+        print(
+            f"[SKIPPED] {problem.path}: {problem.reason}",
+            file=sys.stderr,
+        )
+
+    if batch.incomplete:
+        print(
+            "Warning: review is incomplete.",
+            file=sys.stderr,
+        )
+        return 1
 
     return 0
 

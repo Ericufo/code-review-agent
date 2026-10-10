@@ -37,6 +37,53 @@ class TestParseGitDiff(unittest.TestCase):
             raw_diff
         )
 
+    def test_single_file(self):
+        raw_diff = (
+            "diff --git a/main.py b/main.py\n"
+            "--- a/main.py\n"
+            "+++ b/main.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+
+        result = parse_git_diff(raw_diff)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].path, "main.py")
+        self.assertEqual(result[0].diff, raw_diff)
+
+
+    def test_no_trailing_newline(self):
+        raw_diff = (
+            "diff --git a/main.py b/main.py\n"
+            "--- a/main.py\n"
+            "+++ b/main.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new"
+        )
+
+        result = parse_git_diff(raw_diff)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].diff, raw_diff)
+
+
+    def test_filename_with_spaces(self):
+        raw_diff = (
+            "diff --git a/my file.py b/my file.py\n"
+            "--- a/my file.py\n"
+            "+++ b/my file.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+
+        result = parse_git_diff(raw_diff)
+
+        self.assertEqual(result[0].path, "my file.py")
+
 
 if __name__ == "__main__":
     unittest.main()
