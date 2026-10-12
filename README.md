@@ -95,3 +95,7 @@ GitHub Actions runs tests automatically on pushes and pull requests.
 - V3: Automated PR comments
 - V4: Context-aware agentic review
 - V5: API service and deployment
+
+## V2 API Test
+
+This is a test pull request for GitHub API integration.
