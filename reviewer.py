@@ -1,13 +1,11 @@
 import os
 import json
 
-from dotenv import load_dotenv
 from openai import OpenAI
 
 from pydantic import ValidationError
 from review_models import ReviewResult
 
-load_dotenv()
 
 def get_review_schema() -> str:
     schema = ReviewResult.model_json_schema()
