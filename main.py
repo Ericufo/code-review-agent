@@ -9,7 +9,7 @@ from git_utils import get_git_diff
 from review_models import ReviewResult
 from diff_parser import FileDiff, parse_git_diff
 from review_pipeline import review_files
-from github_client import GitHubClient
+from github_client import GitHubClient, GitHubAPIError
 from github_diff import github_files_to_diff
 
 
@@ -30,8 +30,6 @@ def get_github_files(pr_number: int) -> list[FileDiff]:
     client = GitHubClient()
 
     files = client.get_pull_request_files(
-        owner="Ericufo",
-        repo="code-review-agent",
         number=pr_number,
     )
 
@@ -89,6 +87,13 @@ def main() -> int:
         else:
             file_diffs = get_local_files()
             source = "current Git changes"
+
+    except GitHubAPIError as exc:
+        print(
+            f"GitHub error: {exc}",
+            file=sys.stderr,
+        )
+        return 1
 
     except Exception as exc:
         print(f"Input error: {exc}", file=sys.stderr)
