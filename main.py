@@ -11,6 +11,7 @@ from diff_parser import FileDiff, parse_git_diff
 from review_pipeline import review_files
 from github_client import GitHubClient, GitHubAPIError
 from github_diff import github_files_to_diff
+from review_formatter import format_review_result
 
 
 def get_local_files() -> list[FileDiff]:
@@ -26,9 +27,7 @@ def get_local_files() -> list[FileDiff]:
     return parse_git_diff(diff)
 
 
-def get_github_files(pr_number: int) -> list[FileDiff]:
-    client = GitHubClient()
-
+def get_github_files(client: GitHubClient, pr_number: int) -> list[FileDiff]:
     files = client.get_pull_request_files(
         number=pr_number,
     )
@@ -47,6 +46,14 @@ def parse_args():
     )
 
     return parser.parse_args()
+
+def post_github_comment(client: GitHubClient, pr_number: int, result: ReviewResult):
+    body = format_review_result(result)
+
+    client.create_issue_comment(
+        number=pr_number,
+        body=body,
+    )
 
 def print_review(result: ReviewResult) -> None:
     print()
@@ -79,10 +86,12 @@ def print_review(result: ReviewResult) -> None:
 
 def main() -> int:
     args = parse_args()
+    client = None
 
     try:
         if args.github_pr is not None:
-            file_diffs = get_github_files(args.github_pr)
+            client = GitHubClient()
+            file_diffs = get_github_files(client, args.github_pr)
             source = f"GitHub PR #{args.github_pr}"
         else:
             file_diffs = get_local_files()
@@ -103,7 +112,7 @@ def main() -> int:
         print("No changes to review.")
         return 0
 
-    print("=== Code Review Agent V2 ===")
+    print("=== Code Review Agent V3 ===")
     print(f"Reviewing {source}...")
     print(f"Reviewing {len(file_diffs)} changed file(s)...")
 
@@ -115,6 +124,21 @@ def main() -> int:
         return 1
 
     print_review(batch.result)
+
+    if args.github_pr is not None:
+        try:
+            post_github_comment(
+                client,
+                args.github_pr,
+                batch.result,
+            )
+            print("Posted review comment to GitHub PR.")
+
+        except GitHubAPIError as exc:
+            print(
+                f"Failed to post GitHub comment: {exc}",
+                file=sys.stderr,
+            )
 
     for problem in batch.failures:
         print(

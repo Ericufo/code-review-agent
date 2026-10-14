@@ -78,3 +78,41 @@ class GitHubClient:
         )
 
         return self._get(url)
+
+    def _post(self, url, payload):
+        try:
+            response = requests.post(
+                url,
+                headers=self.headers,
+                json=payload,
+                timeout=10,
+            )
+
+            response.raise_for_status()
+
+        except requests.RequestException as exc:
+            status = (
+                exc.response.status_code
+                if exc.response is not None
+                else "unknown"
+            )
+
+            raise GitHubAPIError(
+                f"GitHub API request failed "
+                f"(status={status})"
+            ) from exc
+
+        return response.json()
+
+    def create_issue_comment(self, number, body):
+        url = (
+            f"{self.base_url}/repos/"
+            f"{self.owner}/{self.repo}"
+            f"/issues/{number}/comments"
+        )
+
+        payload = {
+            "body": body
+        }
+
+        return self._post(url, payload)

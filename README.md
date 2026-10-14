@@ -13,6 +13,7 @@ An AI-powered CLI tool that automatically reviews local Git changes and GitHub P
 - Preserves partial results when individual reviews fail
 - Skips binary and oversized diffs with explicit warnings
 - Handles GitHub API failures with clear error messages
+- Publishes automated review summaries to GitHub Pull Request comments
 - Includes mocked unit tests and GitHub Actions CI
 
 ## Tech Stack
@@ -61,6 +62,9 @@ The tool fetches changed files from the specified GitHub repository,
 converts GitHub patches into internal diff representations,
 and reuses the existing review pipeline.
 
+For GitHub Pull Requests, the generated review summary can also be
+published automatically as a PR comment.
+
 ## Architecture
 
 ```text
@@ -106,8 +110,12 @@ and reuses the existing review pipeline.
 
                      |
                      v
+               ReviewResult
+              +-------------+
+              |             |
+              v             v
 
-                CLI Output
+        CLI Output     GitHub PR Comment
 ```
 
 ## Tests
@@ -124,7 +132,6 @@ GitHub Actions runs tests automatically on pushes and pull requests.
 
 - Reviews diffs, not full repository context
 - Findings can contain false positives
-- Does not yet publish GitHub PR comments
 - Does not maintain repository-level memory or knowledge
 - Large or binary diffs may be skipped
 - Certain specially quoted Git filenames are not yet supported
