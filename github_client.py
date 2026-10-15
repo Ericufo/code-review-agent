@@ -79,6 +79,15 @@ class GitHubClient:
 
         return self._get(url)
 
+    def get_issue_comments(self, number):
+        url = (
+            f"{self.base_url}/repos/"
+            f"{self.owner}/{self.repo}"
+            f"/issues/{number}/comments"
+        )
+
+        return self._get(url)
+
     def _post(self, url, payload):
         try:
             response = requests.post(
@@ -116,3 +125,41 @@ class GitHubClient:
         }
 
         return self._post(url, payload)
+
+    def _patch(self, url, payload):
+        try:
+            response = requests.patch(
+                url,
+                headers=self.headers,
+                json=payload,
+                timeout=10,
+            )
+
+            response.raise_for_status()
+
+        except requests.RequestException as exc:
+            status = (
+                exc.response.status_code
+                if exc.response is not None
+                else "unknown"
+            )
+
+            raise GitHubAPIError(
+                f"GitHub API request failed "
+                f"(status={status})"
+            ) from exc
+
+        return response.json()
+
+    def update_issue_comment(self, comment_id, body):
+        url = (
+            f"{self.base_url}/repos/"
+            f"{self.owner}/{self.repo}"
+            f"/issues/comments/{comment_id}"
+        )
+
+        payload = {
+            "body": body
+        }
+
+        return self._patch(url, payload)
