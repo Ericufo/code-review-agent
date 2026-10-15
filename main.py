@@ -10,6 +10,7 @@ from review_models import ReviewResult
 from diff_parser import FileDiff, parse_git_diff
 from review_pipeline import review_files
 from github_client import GitHubClient, GitHubAPIError
+from github_comment import GitHubCommentManager
 from github_diff import github_files_to_diff
 from review_formatter import format_review_result
 
@@ -50,8 +51,8 @@ def parse_args():
 def post_github_comment(client: GitHubClient, pr_number: int, result: ReviewResult):
     body = format_review_result(result)
 
-    client.create_issue_comment(
-        number=pr_number,
+    return GitHubCommentManager(client).publish(
+        pr_number=pr_number,
         body=body,
     )
 
@@ -125,16 +126,18 @@ def main() -> int:
 
     print_review(batch.result)
 
+    publish_failed = False
     if args.github_pr is not None:
         try:
-            post_github_comment(
+            action = post_github_comment(
                 client,
                 args.github_pr,
                 batch.result,
             )
-            print("Posted review comment to GitHub PR.")
+            print(f"{action.capitalize()} review comment on GitHub PR.")
 
         except GitHubAPIError as exc:
+            publish_failed = True
             print(
                 f"Failed to post GitHub comment: {exc}",
                 file=sys.stderr,
@@ -159,7 +162,7 @@ def main() -> int:
         )
         return 1
 
-    return 0
+    return 1 if publish_failed else 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

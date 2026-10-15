@@ -1,9 +1,10 @@
 import unittest
-from unittest.mock import patch, Mock
+from unittest.mock import patch, Mock, call
 
 import requests
 
 from github_client import GitHubClient, GitHubAPIError
+from github_comment import BOT_MARKER, GitHubCommentManager
 
 
 class TestGitHubClient(unittest.TestCase):
@@ -91,6 +92,7 @@ class TestGitHubClient(unittest.TestCase):
                 "body": "test comment",
             }
         ]
+        mock_response.links = {}
 
         mock_get.return_value = mock_response
 
@@ -106,7 +108,7 @@ class TestGitHubClient(unittest.TestCase):
         )
 
         mock_get.assert_called_once_with(
-            "https://api.github.com/repos/Ericufo/code-review-agent/issues/1/comments",
+            "https://api.github.com/repos/Ericufo/code-review-agent/issues/1/comments?per_page=100",
             headers=client.headers,
             timeout=10,
         )
@@ -150,6 +152,60 @@ class TestGitHubClient(unittest.TestCase):
             },
             timeout=10,
         )
+
+
+@patch.dict("os.environ", {
+    "GITHUB_TOKEN": "fake-token",
+    "GITHUB_OWNER": "Ericufo",
+    "GITHUB_REPO": "code-review-agent",
+})
+class TestCommentPagination(unittest.TestCase):
+    @patch("github_client.requests.patch")
+    @patch("github_client.requests.post")
+    @patch("github_client.requests.get")
+    def test_updates_bot_comment_on_later_page(self, mock_get, mock_post, mock_patch):
+        url = "https://api.github.com/repos/Ericufo/code-review-agent/issues/7/comments"
+        next_url = f"{url}?per_page=100&page=2"
+        first = Mock()
+        first.json.return_value = [{"id": 10, "body": "Human comment"}]
+        first.links = {"next": {"url": next_url}}
+        last = Mock()
+        last.json.return_value = [{"id": 123, "body": BOT_MARKER}]
+        last.links = {}
+        mock_get.side_effect = [first, last]
+        client = GitHubClient()
+
+        action = GitHubCommentManager(client).publish(7, "Latest review")
+
+        self.assertEqual(action, "updated")
+        self.assertEqual(mock_get.call_args_list, [
+            call(f"{url}?per_page=100", headers=client.headers, timeout=10),
+            call(next_url, headers=client.headers, timeout=10),
+        ])
+        mock_post.assert_not_called()
+        mock_patch.assert_called_once_with(
+            "https://api.github.com/repos/Ericufo/code-review-agent/issues/comments/123",
+            headers=client.headers,
+            json={"body": f"{BOT_MARKER}\n\nLatest review"},
+            timeout=10,
+        )
+
+    @patch("github_client.requests.patch")
+    @patch("github_client.requests.post")
+    @patch("github_client.requests.get")
+    def test_later_page_failure_does_not_create_duplicate(
+        self, mock_get, mock_post, mock_patch
+    ):
+        first = Mock()
+        first.json.return_value = [{"id": 10, "body": "Human comment"}]
+        first.links = {"next": {"url": "https://api.github.com/next-page"}}
+        mock_get.side_effect = [first, requests.Timeout("timeout")]
+
+        with self.assertRaises(GitHubAPIError):
+            GitHubCommentManager(GitHubClient()).publish(7, "Latest review")
+
+        mock_post.assert_not_called()
+        mock_patch.assert_not_called()
 
 
 if __name__ == "__main__":

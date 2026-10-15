@@ -35,7 +35,7 @@ class GitHubClient:
             "Accept": "application/vnd.github+json"
         }
 
-    def _get(self, url):
+    def _get_response(self, url):
         try:
             response = requests.get(
                 url,
@@ -57,7 +57,22 @@ class GitHubClient:
                 f"(status={status})"
             ) from exc
 
-        return response.json()
+        return response
+
+    def _get(self, url):
+        return self._get_response(url).json()
+
+    def _get_paginated(self, url):
+        """Collect every page so an existing bot comment cannot be missed."""
+        items = []
+        url = f"{url}?per_page=100"
+
+        while url:
+            response = self._get_response(url)
+            items.extend(response.json())
+            url = response.links.get("next", {}).get("url")
+
+        return items
 
 
     def get_pull_request(self, number):
@@ -86,7 +101,7 @@ class GitHubClient:
             f"/issues/{number}/comments"
         )
 
-        return self._get(url)
+        return self._get_paginated(url)
 
     def _post(self, url, payload):
         try:
