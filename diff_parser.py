@@ -4,6 +4,7 @@ from dataclasses import dataclass
 class FileDiff:
     path: str
     diff: str
+    skip_reason: str | None = None
 
 def parse_git_diff(raw_diff: str) -> list[FileDiff]:
     files = []

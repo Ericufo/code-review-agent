@@ -86,13 +86,30 @@ class GitHubClient:
 
 
     def get_pull_request_files(self, number):
+        pull_request = self.get_pull_request(number)
+        expected_files = pull_request.get("changed_files")
+        if type(expected_files) is not int or expected_files < 0:
+            raise GitHubAPIError("GitHub did not return a valid changed-file count")
+        if expected_files > 3000:
+            raise GitHubAPIError(
+                f"PR has {expected_files} changed files; GitHub's files API "
+                "returns at most 3000. Cannot retrieve the complete file list."
+            )
+
         url = (
             f"{self.base_url}/repos/"
             f"{self.owner}/{self.repo}"
             f"/pulls/{number}/files"
         )
 
-        return self._get(url)
+        files = self._get_paginated(url)
+        if len(files) != expected_files:
+            raise GitHubAPIError(
+                f"GitHub returned {len(files)}/{expected_files} changed files. "
+                "The file list is incomplete or the PR changed during retrieval; "
+                "retry the review."
+            )
+        return files
 
     def get_issue_comments(self, number):
         url = (

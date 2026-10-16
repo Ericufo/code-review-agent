@@ -208,5 +208,87 @@ class TestCommentPagination(unittest.TestCase):
         mock_patch.assert_not_called()
 
 
+@patch.dict("os.environ", {
+    "GITHUB_TOKEN": "fake-token",
+    "GITHUB_OWNER": "Ericufo",
+    "GITHUB_REPO": "code-review-agent",
+})
+class TestPRFilePagination(unittest.TestCase):
+    url = "https://api.github.com/repos/Ericufo/code-review-agent/pulls/7"
+
+    @staticmethod
+    def response(data, next_url=None):
+        response = Mock()
+        response.json.return_value = data
+        response.links = {"next": {"url": next_url}} if next_url else {}
+        return response
+
+    @patch("github_client.requests.get")
+    def test_fetches_every_file_page(self, mock_get):
+        files = [{"filename": f"file_{index}.py", "patch": "diff"} for index in range(105)]
+        next_url = f"{self.url}/files?per_page=100&page=2"
+        mock_get.side_effect = [
+            self.response({"changed_files": 105}),
+            self.response(files[:100], next_url),
+            self.response(files[100:]),
+        ]
+        client = GitHubClient()
+
+        result = client.get_pull_request_files(7)
+
+        self.assertEqual(result, files)
+        self.assertEqual(mock_get.call_args_list, [
+            call(self.url, headers=client.headers, timeout=10),
+            call(f"{self.url}/files?per_page=100", headers=client.headers, timeout=10),
+            call(next_url, headers=client.headers, timeout=10),
+        ])
+
+    @patch("github_client.requests.get")
+    def test_second_page_failure_raises_instead_of_returning_first_page(self, mock_get):
+        mock_get.side_effect = [
+            self.response({"changed_files": 2}),
+            self.response([{"filename": "first.py"}], f"{self.url}/files?page=2"),
+            requests.Timeout("page 2 timeout"),
+        ]
+
+        with self.assertRaises(GitHubAPIError):
+            GitHubClient().get_pull_request_files(7)
+        self.assertEqual(mock_get.call_count, 3)
+
+    @patch("github_client.requests.get")
+    def test_mismatched_file_count_is_not_accepted_as_complete(self, mock_get):
+        mock_get.side_effect = [
+            self.response({"changed_files": 2}),
+            self.response([{"filename": "first.py"}]),
+        ]
+
+        with self.assertRaisesRegex(GitHubAPIError, "returned 1/2 changed files"):
+            GitHubClient().get_pull_request_files(7)
+
+    @patch("github_client.requests.get")
+    def test_pr_over_github_file_limit_is_rejected(self, mock_get):
+        mock_get.return_value = self.response({"changed_files": 3001})
+
+        with self.assertRaisesRegex(GitHubAPIError, "at most 3000"):
+            GitHubClient().get_pull_request_files(7)
+        mock_get.assert_called_once()
+
+    @patch("github_client.requests.get")
+    def test_empty_pr_returns_empty_list(self, mock_get):
+        mock_get.side_effect = [
+            self.response({"changed_files": 0}), self.response([]),
+        ]
+
+        self.assertEqual(GitHubClient().get_pull_request_files(7), [])
+
+    @patch("github_client.requests.get")
+    def test_invalid_file_count_is_not_assumed_to_be_zero(self, mock_get):
+        for value in (None, "2", -1, True):
+            with self.subTest(value=value):
+                mock_get.return_value = self.response({"changed_files": value})
+                with self.assertRaisesRegex(GitHubAPIError, "valid changed-file count"):
+                    GitHubClient().get_pull_request_files(7)
+
+
 if __name__ == "__main__":
     unittest.main()

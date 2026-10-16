@@ -15,6 +15,7 @@ class TestReviewFiles(unittest.TestCase):
 
         self.assertEqual(batch.result.issues, [])
         self.assertFalse(batch.incomplete)
+        self.assertEqual((batch.reviewed_files, batch.total_files), (0, 0))
         mock_review.assert_not_called()
 
     @patch("review_pipeline.review_diff")
@@ -49,7 +50,8 @@ class TestReviewFiles(unittest.TestCase):
         )
         self.assertEqual(len(batch.result.issues), 1)
         self.assertEqual(batch.result.issues[0].file, "main.py")
-        self.assertIn("Reviewed 2/2 file(s)", batch.result.summary)
+        self.assertIn("Reviewed 2/2 file(s)", batch.coverage_summary)
+        self.assertEqual((batch.reviewed_files, batch.total_files), (2, 2))
         self.assertFalse(batch.incomplete)
 
     @patch("review_pipeline.review_diff")
@@ -67,7 +69,7 @@ class TestReviewFiles(unittest.TestCase):
         self.assertEqual(mock_review.call_count, 2)
         self.assertEqual(batch.failures[0].path, "broken.py")
         self.assertIn("fine.py: ok", batch.result.summary)
-        self.assertIn("Reviewed 1/2 file(s)", batch.result.summary)
+        self.assertIn("Reviewed 1/2 file(s)", batch.coverage_summary)
         self.assertTrue(batch.incomplete)
 
     @patch("review_pipeline.review_diff")
@@ -79,7 +81,7 @@ class TestReviewFiles(unittest.TestCase):
         ])
 
         self.assertEqual(batch.result.issues, [])
-        self.assertIn("Reviewed 0/1 file(s)", batch.result.summary)
+        self.assertIn("Reviewed 0/1 file(s)", batch.coverage_summary)
         self.assertEqual(len(batch.failures), 1)
         self.assertTrue(batch.incomplete)
 
@@ -125,6 +127,47 @@ class TestReviewFiles(unittest.TestCase):
 
         mock_review.assert_not_called()
         self.assertTrue(batch.incomplete)
+    
+    @patch("review_pipeline.review_diff")
+    def test_missing_patch_does_not_consume_review_budget(self, mock_review):
+        mock_review.return_value = ReviewResult(summary="ok", issues=[])
+
+        batch = review_files([
+            FileDiff("image.png", "", skip_reason="patch unavailable"),
+            FileDiff("main.py", "diff"),
+        ], max_files=1, max_total_chars=4)
+
+        mock_review.assert_called_once_with("diff")
+        self.assertEqual((batch.reviewed_files, batch.total_files), (1, 2))
+        self.assertEqual(batch.skipped[0].reason, "patch unavailable")
+        self.assertTrue(batch.incomplete)
+
+    @patch("review_pipeline.review_diff")
+    def test_mixed_outcomes_are_all_counted(self, mock_review):
+        mock_review.side_effect = [
+            ReviewResult(summary="ok", issues=[]),
+            TimeoutError("model timeout"),
+        ]
+
+        batch = review_files([
+            FileDiff("image.png", "", skip_reason="patch unavailable"),
+            FileDiff("good.py", "diff"),
+            FileDiff("failed.py", "diff"),
+            FileDiff("large.py", "x" * 11),
+            FileDiff("over_budget.py", "diff"),
+        ], max_files=2, max_file_chars=10)
+
+        self.assertEqual(mock_review.call_count, 2)
+        self.assertEqual(batch.total_files, 5)
+        self.assertEqual(batch.reviewed_files, 1)
+        self.assertEqual(len(batch.failures), 1)
+        self.assertEqual(len(batch.skipped), 3)
+        self.assertEqual(
+            batch.reviewed_files + len(batch.failures) + len(batch.skipped),
+            batch.total_files,
+        )
+        self.assertIn("maximum 2 LLM calls", batch.skipped[-1].reason)
+
 
 
 if __name__ == "__main__":

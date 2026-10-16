@@ -22,10 +22,20 @@ class ReviewBatch:
     result: ReviewResult
     failures: list[FileProblem]
     skipped: list[FileProblem]
+    total_files: int
+    reviewed_files: int
 
     @property
     def incomplete(self) -> bool:
         return bool(self.failures or self.skipped)
+
+    @property
+    def coverage_summary(self) -> str:
+        return (
+            f"Reviewed {self.reviewed_files}/{self.total_files} file(s). "
+            f"Found {len(self.result.issues)} issue(s). "
+            f"Failed: {len(self.failures)}; skipped: {len(self.skipped)}."
+        )
 
 
 def review_files(
@@ -45,6 +55,8 @@ def review_files(
             ),
             failures=[],
             skipped=[],
+            total_files=0,
+            reviewed_files=0,
         )
 
     summaries: list[str] = []
@@ -58,6 +70,11 @@ def review_files(
 
     for file_diff in file_diffs:
         path, diff = file_diff.path, file_diff.diff
+
+        # Keep unavailable patches in the denominator without using LLM budget.
+        if file_diff.skip_reason is not None:
+            skipped.append(FileProblem(path, file_diff.skip_reason))
+            continue
 
         # Skip binary patches that cannot be reviewed as source text.
         if "\nGIT binary patch\n" in f"\n{diff}\n" or any(
@@ -127,21 +144,13 @@ def review_files(
         )
         issues.extend(validated_issues)
 
-    header = (
-        f"Reviewed {reviewed}/{len(file_diffs)} file(s). "
-        f"Found {len(issues)} issue(s). "
-        f"Failed: {len(failures)}; skipped: {len(skipped)}."
-    )
-
-    summary = header
-    if summaries:
-        summary += "\n\n" + "\n".join(summaries)
-
     return ReviewBatch(
         result=ReviewResult(
-            summary=summary,
+            summary="\n".join(summaries),
             issues=issues,
         ),
         failures=failures,
         skipped=skipped,
+        total_files=len(file_diffs),
+        reviewed_files=reviewed,
     )

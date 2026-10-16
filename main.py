@@ -6,13 +6,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from git_utils import get_git_diff
-from review_models import ReviewResult
 from diff_parser import FileDiff, parse_git_diff
-from review_pipeline import review_files
+from review_pipeline import ReviewBatch, review_files
 from github_client import GitHubClient, GitHubAPIError
 from github_comment import GitHubCommentManager
 from github_diff import github_files_to_diff
-from review_formatter import format_review_result
+from review_formatter import format_review_batch, no_findings_message
 
 
 def get_local_files() -> list[FileDiff]:
@@ -48,22 +47,26 @@ def parse_args():
 
     return parser.parse_args()
 
-def post_github_comment(client: GitHubClient, pr_number: int, result: ReviewResult):
-    body = format_review_result(result)
+def post_github_comment(client: GitHubClient, pr_number: int, batch: ReviewBatch) -> str:
+    body = format_review_batch(batch)
 
     return GitHubCommentManager(client).publish(
         pr_number=pr_number,
         body=body,
     )
 
-def print_review(result: ReviewResult) -> None:
+def print_review(batch: ReviewBatch) -> None:
+    result = batch.result
     print()
     print("=== Review Result ===")
+    status = "INCOMPLETE" if batch.incomplete else "COMPLETE"
+    print(f"Status: {status}")
+    print(batch.coverage_summary)
     print(result.summary)
 
     if not result.issues:
         print()
-        print("No issues found.")
+        print(no_findings_message(batch))
         return
 
     for index, issue in enumerate(result.issues, start=1):
@@ -124,7 +127,7 @@ def main() -> int:
         print(f"Review failed: {exc}", file=sys.stderr)
         return 1
 
-    print_review(batch.result)
+    print_review(batch)
 
     publish_failed = False
     if args.github_pr is not None:
@@ -132,7 +135,7 @@ def main() -> int:
             action = post_github_comment(
                 client,
                 args.github_pr,
-                batch.result,
+                batch,
             )
             print(f"{action.capitalize()} review comment on GitHub PR.")
 
