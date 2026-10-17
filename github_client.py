@@ -35,7 +35,7 @@ class GitHubClient:
             "Accept": "application/vnd.github+json"
         }
 
-    def _get(self, url):
+    def _get_response(self, url):
         try:
             response = requests.get(
                 url,
@@ -57,7 +57,22 @@ class GitHubClient:
                 f"(status={status})"
             ) from exc
 
-        return response.json()
+        return response
+
+    def _get(self, url):
+        return self._get_response(url).json()
+
+    def _get_paginated(self, url):
+        """Collect every page so an existing bot comment cannot be missed."""
+        items = []
+        url = f"{url}?per_page=100"
+
+        while url:
+            response = self._get_response(url)
+            items.extend(response.json())
+            url = response.links.get("next", {}).get("url")
+
+        return items
 
 
     def get_pull_request(self, number):
@@ -71,10 +86,124 @@ class GitHubClient:
 
 
     def get_pull_request_files(self, number):
+        pull_request = self.get_pull_request(number)
+        expected_files = pull_request.get("changed_files")
+        if type(expected_files) is not int or expected_files < 0:
+            raise GitHubAPIError("GitHub did not return a valid changed-file count")
+        if expected_files > 3000:
+            raise GitHubAPIError(
+                f"PR has {expected_files} changed files; GitHub's files API "
+                "returns at most 3000. Cannot retrieve the complete file list."
+            )
+
         url = (
             f"{self.base_url}/repos/"
             f"{self.owner}/{self.repo}"
             f"/pulls/{number}/files"
         )
 
-        return self._get(url)
+        files = self._get_paginated(url)
+        if len(files) != expected_files:
+            raise GitHubAPIError(
+                f"GitHub returned {len(files)}/{expected_files} changed files. "
+                "The file list is incomplete or the PR changed during retrieval; "
+                "retry the review."
+            )
+        return files
+
+    def get_issue_comments(self, number):
+        url = (
+            f"{self.base_url}/repos/"
+            f"{self.owner}/{self.repo}"
+            f"/issues/{number}/comments"
+        )
+
+        return self._get_paginated(url)
+
+    def get_comment_author_login(self) -> str:
+        """Resolve the expected publisher, not the user who triggered a workflow."""
+        login = os.getenv("GITHUB_COMMENT_AUTHOR")
+        if login is None:
+            # Personal/user tokens support /user; Actions installation tokens do
+            # not. The workflow explicitly supplies github-actions[bot] instead.
+            user = self._get(f"{self.base_url}/user")
+            login = user.get("login") if isinstance(user, dict) else None
+        if not isinstance(login, str) or not login.strip():
+            raise GitHubAPIError("Cannot determine the review comment author")
+        return login.strip()
+
+    def _post(self, url, payload):
+        try:
+            response = requests.post(
+                url,
+                headers=self.headers,
+                json=payload,
+                timeout=10,
+            )
+
+            response.raise_for_status()
+
+        except requests.RequestException as exc:
+            status = (
+                exc.response.status_code
+                if exc.response is not None
+                else "unknown"
+            )
+
+            raise GitHubAPIError(
+                f"GitHub API request failed "
+                f"(status={status})"
+            ) from exc
+
+        return response.json()
+
+    def create_issue_comment(self, number, body):
+        url = (
+            f"{self.base_url}/repos/"
+            f"{self.owner}/{self.repo}"
+            f"/issues/{number}/comments"
+        )
+
+        payload = {
+            "body": body
+        }
+
+        return self._post(url, payload)
+
+    def _patch(self, url, payload):
+        try:
+            response = requests.patch(
+                url,
+                headers=self.headers,
+                json=payload,
+                timeout=10,
+            )
+
+            response.raise_for_status()
+
+        except requests.RequestException as exc:
+            status = (
+                exc.response.status_code
+                if exc.response is not None
+                else "unknown"
+            )
+
+            raise GitHubAPIError(
+                f"GitHub API request failed "
+                f"(status={status})"
+            ) from exc
+
+        return response.json()
+
+    def update_issue_comment(self, comment_id, body):
+        url = (
+            f"{self.base_url}/repos/"
+            f"{self.owner}/{self.repo}"
+            f"/issues/comments/{comment_id}"
+        )
+
+        payload = {
+            "body": body
+        }
+
+        return self._patch(url, payload)

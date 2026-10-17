@@ -1,14 +1,49 @@
 
 from dataclasses import dataclass
+from collections import Counter
 
 from diff_parser import FileDiff
-from review_models import ReviewResult
+from review_models import ReviewIssue, ReviewResult, SEVERITY_ORDER
 from reviewer import review_diff
 
 
 MAX_FILES = 30
 MAX_FILE_CHARS = 20_000
-MAX_TOTAL_CHARS = 80_000
+MAX_TOTAL_CHARS = 160_000
+
+
+def build_review_summary(
+    issues: list[ReviewIssue],
+    *,
+    total_files: int,
+    reviewed_files: int,
+    incomplete: bool,
+) -> str:
+    """Build a short batch overview without another model call or clean-file prose."""
+    if total_files == 0:
+        return "No changed files to review."
+    if reviewed_files == 0:
+        return "No files were successfully reviewed. No conclusion can be drawn."
+    if not issues:
+        if incomplete:
+            return (
+                "No issues found in the successfully reviewed files. "
+                "Review is incomplete."
+            )
+        return "No issues found in the reviewed changes."
+
+    counts = Counter(issue.severity for issue in issues)
+    severity_counts = ", ".join(
+        f"{counts[level]} {level}" for level in SEVERITY_ORDER if counts[level]
+    )
+    affected_files = len({issue.file for issue in issues})
+    summary = (
+        f"Found {len(issues)} potential issue(s) across {affected_files} file(s): "
+        f"{severity_counts}."
+    )
+    if incomplete:
+        summary += " Findings cover only successfully reviewed files."
+    return summary
 
 
 @dataclass(frozen=True)
@@ -22,10 +57,20 @@ class ReviewBatch:
     result: ReviewResult
     failures: list[FileProblem]
     skipped: list[FileProblem]
+    total_files: int
+    reviewed_files: int
 
     @property
     def incomplete(self) -> bool:
         return bool(self.failures or self.skipped)
+
+    @property
+    def coverage_summary(self) -> str:
+        return (
+            f"Reviewed {self.reviewed_files}/{self.total_files} file(s). "
+            f"Found {len(self.result.issues)} issue(s). "
+            f"Failed: {len(self.failures)}; skipped: {len(self.skipped)}."
+        )
 
 
 def review_files(
@@ -45,9 +90,10 @@ def review_files(
             ),
             failures=[],
             skipped=[],
+            total_files=0,
+            reviewed_files=0,
         )
 
-    summaries: list[str] = []
     issues = []
     failures: list[FileProblem] = []
     skipped: list[FileProblem] = []
@@ -58,6 +104,11 @@ def review_files(
 
     for file_diff in file_diffs:
         path, diff = file_diff.path, file_diff.diff
+
+        # Keep unavailable patches in the denominator without using LLM budget.
+        if file_diff.skip_reason is not None:
+            skipped.append(FileProblem(path, file_diff.skip_reason))
+            continue
 
         # Skip binary patches that cannot be reviewed as source text.
         if "\nGIT binary patch\n" in f"\n{diff}\n" or any(
@@ -122,26 +173,20 @@ def review_files(
             continue
 
         reviewed += 1
-        summaries.append(
-            f"{path}: {file_result.summary.strip()}"
-        )
         issues.extend(validated_issues)
 
-    header = (
-        f"Reviewed {reviewed}/{len(file_diffs)} file(s). "
-        f"Found {len(issues)} issue(s). "
-        f"Failed: {len(failures)}; skipped: {len(skipped)}."
-    )
-
-    summary = header
-    if summaries:
-        summary += "\n\n" + "\n".join(summaries)
-
+    # Stable sorting preserves the model's ordering within each severity level.
+    issues.sort(key=lambda issue: SEVERITY_ORDER.index(issue.severity))
     return ReviewBatch(
         result=ReviewResult(
-            summary=summary,
+            summary=build_review_summary(
+                issues, total_files=len(file_diffs), reviewed_files=reviewed,
+                incomplete=bool(failures or skipped),
+            ),
             issues=issues,
         ),
         failures=failures,
         skipped=skipped,
+        total_files=len(file_diffs),
+        reviewed_files=reviewed,
     )
