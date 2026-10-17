@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import Mock
 
 from github_client import GitHubClient
+from github_review import PullRequestRevision, ReviewSupersededError
 from github_comment import (
     BOT_MARKER,
     GitHubCommentManager,
@@ -89,6 +90,30 @@ class TestGitHubCommentManager(unittest.TestCase):
         self.assertEqual(action, "created")
 
         self.client.create_issue_comment.assert_called_once()
+
+    def test_revision_is_checked_after_comment_pagination_before_any_write(self):
+        for comments in ([], [{"id": 123, "body": BOT_MARKER}]):
+            with self.subTest(comments=comments):
+                self.client.reset_mock()
+                self.client.get_pull_request.return_value = {
+                    "state": "open", "draft": False,
+                    "head": {"sha": "a" * 40}, "base": {"sha": "b" * 40},
+                }
+
+                def list_comments(number):
+                    # Simulate a push while fetching the comment pages.
+                    self.client.get_pull_request.return_value["head"]["sha"] = "c" * 40
+                    return comments
+
+                self.client.get_issue_comments.side_effect = list_comments
+
+                with self.assertRaises(ReviewSupersededError):
+                    self.manager.publish(
+                        7, "Old result", revision=PullRequestRevision("a" * 40, "b" * 40),
+                    )
+
+                self.client.create_issue_comment.assert_not_called()
+                self.client.update_issue_comment.assert_not_called()
 
 
 if __name__ == "__main__":

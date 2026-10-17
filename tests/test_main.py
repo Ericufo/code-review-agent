@@ -13,6 +13,11 @@ from review_models import ReviewResult
 class TestMain(unittest.TestCase):
     def setUp(self):
         self.client = Mock(spec=GitHubClient)
+        self.metadata = {
+            "state": "open", "draft": False,
+            "head": {"sha": "a" * 40}, "base": {"sha": "b" * 40},
+        }
+        self.client.get_pull_request.return_value = self.metadata
         self.client.get_pull_request_files.return_value = [
             {"filename": "example.py", "patch": "@@ -1 +1 @@\n-old\n+new"}
         ]
@@ -53,6 +58,8 @@ class TestMain(unittest.TestCase):
         self.assertIn("First review", created["body"])
         self.assertIn("Status: **COMPLETE**", created["body"])
         self.assertIn("Reviewed 1/1 file(s)", created["body"])
+        self.assertIn(f"Reviewed commit: `{'a' * 40}`", created["body"])
+        self.assertIn(f"Base commit: `{'b' * 40}`", created["body"])
 
         self.client.get_issue_comments.return_value = [
             {"id": 10, "body": "Human comment"},
@@ -233,18 +240,107 @@ class TestMain(unittest.TestCase):
         self.client.create_issue_comment.assert_not_called()
         self.client.update_issue_comment.assert_not_called()
 
-    def test_no_changes_does_not_review_or_publish(self):
+    def test_empty_pr_updates_old_findings_without_calling_model(self):
         self.client.get_pull_request_files.return_value = []
+        self.client.get_issue_comments.return_value = [
+            {"id": 123, "body": f"{BOT_MARKER}\nOld findings"},
+        ]
 
         exit_code, stdout, stderr = self.run_cli("--github-pr", "7")
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(stderr, "")
+        self.assertIn("No changed files to review", stdout)
+        self.review.assert_not_called()
+        self.client.create_issue_comment.assert_not_called()
+        self.client.update_issue_comment.assert_called_once()
+        body = self.client.update_issue_comment.call_args.kwargs["body"]
+        self.assertIn("Reviewed 0/0 file(s)", body)
+        self.assertNotIn("Old findings", body)
+
+    def test_empty_local_diff_does_not_review_or_publish(self):
+        with patch("main.get_local_files", return_value=[]):
+            exit_code, stdout, stderr = self.run_cli()
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
         self.assertIn("No changes to review", stdout)
         self.review.assert_not_called()
-        self.client.get_issue_comments.assert_not_called()
+        self.client_factory.assert_not_called()
+
+    def assert_no_comment_written(self):
         self.client.create_issue_comment.assert_not_called()
         self.client.update_issue_comment.assert_not_called()
+
+    def test_current_event_head_runs_review(self):
+        exit_code, _, stderr = self.run_cli(
+            "--github-pr", "7", "--expected-head-sha", "a" * 40,
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.review.assert_called_once()
+        self.client.create_issue_comment.assert_called_once()
+
+    def test_old_event_is_skipped_before_fetching_files_or_calling_model(self):
+        exit_code, stdout, stderr = self.run_cli(
+            "--github-pr", "7", "--expected-head-sha", "c" * 40,
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn("skipping outdated run", stdout)
+        self.client.get_pull_request_files.assert_not_called()
+        self.review.assert_not_called()
+        self.assert_no_comment_written()
+
+    def test_revision_change_during_file_fetch_skips_model(self):
+        changed = {**self.metadata, "head": {"sha": "c" * 40}}
+        self.client.get_pull_request.side_effect = [self.metadata, changed]
+
+        exit_code, stdout, _ = self.run_cli("--github-pr", "7")
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("discarding outdated results", stdout)
+        self.review.assert_not_called()
+        self.assert_no_comment_written()
+
+    def test_revision_or_state_change_during_review_never_publishes(self):
+        for changes in (
+            {"head": {"sha": "c" * 40}},
+            {"base": {"sha": "c" * 40}},
+            {"state": "closed"},
+            {"draft": True},
+        ):
+            with self.subTest(changes=changes):
+                self.client.reset_mock()
+                self.review.reset_mock()
+                self.client.get_pull_request.side_effect = [
+                    self.metadata, self.metadata, {**self.metadata, **changes},
+                ]
+
+                exit_code, stdout, _ = self.run_cli("--github-pr", "7")
+
+                self.assertEqual(exit_code, 0)
+                self.review.assert_called_once()
+                self.assertIn("Review skipped:", stdout)
+                self.assertNotIn("Created review comment", stdout)
+                self.assert_no_comment_written()
+
+    def test_failed_final_revision_check_does_not_publish(self):
+        self.client.get_pull_request.side_effect = [
+            self.metadata, self.metadata, GitHubAPIError("revision check failed"),
+        ]
+
+        exit_code, stdout, stderr = self.run_cli("--github-pr", "7")
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("revision check failed", stderr)
+        self.assertNotIn("Created review comment", stdout)
+        self.assert_no_comment_written()
+
+    def test_expected_head_requires_pr_mode(self):
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli("--expected-head-sha", "a" * 40)
+        self.assertEqual(caught.exception.code, 2)
+        self.client_factory.assert_not_called()
 
 
 if __name__ == "__main__":

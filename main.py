@@ -11,6 +11,12 @@ from review_pipeline import ReviewBatch, review_files
 from github_client import GitHubClient, GitHubAPIError
 from github_comment import GitHubCommentManager
 from github_diff import github_files_to_diff
+from github_review import (
+    PullRequestRevision,
+    ReviewSupersededError,
+    ensure_current_revision,
+    get_review_revision,
+)
 from review_formatter import format_review_batch, no_findings_message
 
 
@@ -45,14 +51,32 @@ def parse_args():
         help="Review a GitHub pull request"
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        "--expected-head-sha",
+        help="Skip an outdated Actions run if the PR head has changed",
+    )
 
-def post_github_comment(client: GitHubClient, pr_number: int, batch: ReviewBatch) -> str:
+    args = parser.parse_args()
+    if args.expected_head_sha is not None and args.github_pr is None:
+        parser.error("--expected-head-sha requires --github-pr")
+    return args
+
+def post_github_comment(
+    client: GitHubClient,
+    pr_number: int,
+    batch: ReviewBatch,
+    revision: PullRequestRevision,
+) -> str:
     body = format_review_batch(batch)
+    body += (
+        f"\n\nReviewed commit: `{revision.head_sha}`\n\n"
+        f"Base commit: `{revision.base_sha}`"
+    )
 
     return GitHubCommentManager(client).publish(
         pr_number=pr_number,
         body=body,
+        revision=revision,
     )
 
 def print_review(batch: ReviewBatch) -> None:
@@ -95,11 +119,20 @@ def main() -> int:
     try:
         if args.github_pr is not None:
             client = GitHubClient()
+            revision = get_review_revision(
+                client, args.github_pr, expected_head_sha=args.expected_head_sha,
+            )
             file_diffs = get_github_files(client, args.github_pr)
+            # Reject a mixed file list even if its file count stayed the same.
+            ensure_current_revision(client, args.github_pr, revision)
             source = f"GitHub PR #{args.github_pr}"
         else:
             file_diffs = get_local_files()
             source = "current Git changes"
+
+    except ReviewSupersededError as exc:
+        print(f"Review skipped: {exc}")
+        return 0
 
     except GitHubAPIError as exc:
         print(
@@ -112,13 +145,16 @@ def main() -> int:
         print(f"Input error: {exc}", file=sys.stderr)
         return 1
 
-    if not file_diffs:
+    if not file_diffs and client is None:
         print("No changes to review.")
         return 0
 
     print("=== Code Review Agent V3 ===")
     print(f"Reviewing {source}...")
     print(f"Reviewing {len(file_diffs)} changed file(s)...")
+    if client is not None:
+        print(f"Reviewed commit: {revision.head_sha}")
+        print(f"Base commit: {revision.base_sha}")
 
     try:
         batch = review_files(file_diffs)
@@ -136,8 +172,13 @@ def main() -> int:
                 client,
                 args.github_pr,
                 batch,
+                revision,
             )
             print(f"{action.capitalize()} review comment on GitHub PR.")
+
+        except ReviewSupersededError as exc:
+            print(f"Review skipped: {exc}")
+            return 0
 
         except GitHubAPIError as exc:
             publish_failed = True

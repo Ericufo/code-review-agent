@@ -1,4 +1,5 @@
 from github_client import GitHubClient
+from github_review import PullRequestRevision, ensure_current_revision
 
 
 BOT_MARKER = "<!-- code-review-agent -->"
@@ -12,10 +13,16 @@ class GitHubCommentManager:
         self,
         pr_number: int,
         body: str,
+        *,
+        revision: PullRequestRevision | None = None,
     ) -> str:
         comments = self.client.get_issue_comments(
             number=pr_number,
         )
+
+        # Comment pagination can take time: check again just before writing.
+        if revision is not None:
+            ensure_current_revision(self.client, pr_number, revision)
 
         marked_body = (
             f"{BOT_MARKER}\n\n"
