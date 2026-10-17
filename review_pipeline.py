@@ -1,14 +1,49 @@
 
 from dataclasses import dataclass
+from collections import Counter
 
 from diff_parser import FileDiff
-from review_models import ReviewResult
+from review_models import ReviewIssue, ReviewResult, SEVERITY_ORDER
 from reviewer import review_diff
 
 
 MAX_FILES = 30
 MAX_FILE_CHARS = 20_000
 MAX_TOTAL_CHARS = 80_000
+
+
+def build_review_summary(
+    issues: list[ReviewIssue],
+    *,
+    total_files: int,
+    reviewed_files: int,
+    incomplete: bool,
+) -> str:
+    """Build a short batch overview without another model call or clean-file prose."""
+    if total_files == 0:
+        return "No changed files to review."
+    if reviewed_files == 0:
+        return "No files were successfully reviewed. No conclusion can be drawn."
+    if not issues:
+        if incomplete:
+            return (
+                "No issues found in the successfully reviewed files. "
+                "Review is incomplete."
+            )
+        return "No issues found in the reviewed changes."
+
+    counts = Counter(issue.severity for issue in issues)
+    severity_counts = ", ".join(
+        f"{counts[level]} {level}" for level in SEVERITY_ORDER if counts[level]
+    )
+    affected_files = len({issue.file for issue in issues})
+    summary = (
+        f"Found {len(issues)} potential issue(s) across {affected_files} file(s): "
+        f"{severity_counts}."
+    )
+    if incomplete:
+        summary += " Findings cover only successfully reviewed files."
+    return summary
 
 
 @dataclass(frozen=True)
@@ -59,7 +94,6 @@ def review_files(
             reviewed_files=0,
         )
 
-    summaries: list[str] = []
     issues = []
     failures: list[FileProblem] = []
     skipped: list[FileProblem] = []
@@ -139,14 +173,16 @@ def review_files(
             continue
 
         reviewed += 1
-        summaries.append(
-            f"{path}: {file_result.summary.strip()}"
-        )
         issues.extend(validated_issues)
 
+    # Stable sorting preserves the model's ordering within each severity level.
+    issues.sort(key=lambda issue: SEVERITY_ORDER.index(issue.severity))
     return ReviewBatch(
         result=ReviewResult(
-            summary="\n".join(summaries),
+            summary=build_review_summary(
+                issues, total_files=len(file_diffs), reviewed_files=reviewed,
+                incomplete=bool(failures or skipped),
+            ),
             issues=issues,
         ),
         failures=failures,

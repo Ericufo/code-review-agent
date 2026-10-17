@@ -7,12 +7,13 @@ import main
 from diff_parser import FileDiff
 from github_client import GitHubAPIError, GitHubClient
 from github_comment import BOT_MARKER
-from review_models import ReviewResult
+from review_models import ReviewIssue, ReviewResult
 
 
 class TestMain(unittest.TestCase):
     def setUp(self):
         self.client = Mock(spec=GitHubClient)
+        self.client.get_comment_author_login.return_value = "github-actions[bot]"
         self.metadata = {
             "state": "open", "draft": False,
             "head": {"sha": "a" * 40}, "base": {"sha": "b" * 40},
@@ -45,6 +46,9 @@ class TestMain(unittest.TestCase):
         return exit_code, stdout.getvalue(), stderr.getvalue()
 
     def test_repeated_pr_review_creates_then_updates_marked_comment(self):
+        self.review.return_value = ReviewResult(summary="Per-file prose", issues=[ReviewIssue(
+            severity="high", file="example.py", title="First finding", description="First defect",
+        )])
         exit_code, stdout, stderr = self.run_cli("--github-pr", "7")
 
         self.assertEqual(exit_code, 0)
@@ -55,7 +59,8 @@ class TestMain(unittest.TestCase):
         created = self.client.create_issue_comment.call_args.kwargs
         self.assertEqual(created["number"], 7)
         self.assertTrue(created["body"].startswith(BOT_MARKER))
-        self.assertIn("First review", created["body"])
+        self.assertIn("First finding", created["body"])
+        self.assertNotIn("Per-file prose", created["body"])
         self.assertIn("Status: **COMPLETE**", created["body"])
         self.assertIn("Reviewed 1/1 file(s)", created["body"])
         self.assertIn(f"Reviewed commit: `{'a' * 40}`", created["body"])
@@ -63,7 +68,7 @@ class TestMain(unittest.TestCase):
 
         self.client.get_issue_comments.return_value = [
             {"id": 10, "body": "Human comment"},
-            {"id": 123, "body": created["body"]},
+            {"id": 123, "body": created["body"], "user": {"login": "github-actions[bot]"}},
         ]
         self.review.return_value = ReviewResult(summary="Latest review", issues=[])
 
@@ -77,17 +82,18 @@ class TestMain(unittest.TestCase):
         updated = self.client.update_issue_comment.call_args.kwargs
         self.assertEqual(updated["comment_id"], 123)
         self.assertTrue(updated["body"].startswith(BOT_MARKER))
-        self.assertIn("Latest review", updated["body"])
-        self.assertNotIn("First review", updated["body"])
+        self.assertIn("No issues found in the reviewed changes", updated["body"])
+        self.assertNotIn("First finding", updated["body"])
+        self.assertNotIn("### Findings", updated["body"])
 
     def test_comment_failures_return_nonzero_without_success_message(self):
         for operation in (
-            "get_issue_comments", "create_issue_comment", "update_issue_comment"
+            "get_issue_comments", "get_comment_author_login", "create_issue_comment", "update_issue_comment"
         ):
             with self.subTest(operation=operation):
                 self.client.reset_mock(side_effect=True)
                 self.client.get_issue_comments.return_value = (
-                    [{"id": 123, "body": BOT_MARKER}]
+                    [{"id": 123, "body": BOT_MARKER, "user": {"login": "github-actions[bot]"}}]
                     if operation == "update_issue_comment" else []
                 )
                 getattr(self.client, operation).side_effect = GitHubAPIError(
@@ -101,7 +107,7 @@ class TestMain(unittest.TestCase):
                 self.assertIn("=== Review Result ===", stdout)
                 self.assertNotIn("Created review comment", stdout)
                 self.assertNotIn("Updated review comment", stdout)
-                if operation == "get_issue_comments":
+                if operation in ("get_issue_comments", "get_comment_author_login"):
                     self.client.create_issue_comment.assert_not_called()
                     self.client.update_issue_comment.assert_not_called()
                 elif operation == "update_issue_comment":
@@ -235,7 +241,8 @@ class TestMain(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(stderr, "")
-        self.assertIn("First review", stdout)
+        self.assertIn("No issues found in the reviewed changes", stdout)
+        self.assertNotIn("First review", stdout)
         self.client_factory.assert_not_called()
         self.client.create_issue_comment.assert_not_called()
         self.client.update_issue_comment.assert_not_called()
@@ -243,7 +250,7 @@ class TestMain(unittest.TestCase):
     def test_empty_pr_updates_old_findings_without_calling_model(self):
         self.client.get_pull_request_files.return_value = []
         self.client.get_issue_comments.return_value = [
-            {"id": 123, "body": f"{BOT_MARKER}\nOld findings"},
+            {"id": 123, "body": f"{BOT_MARKER}\nOld findings", "user": {"login": "github-actions[bot]"}},
         ]
 
         exit_code, stdout, stderr = self.run_cli("--github-pr", "7")

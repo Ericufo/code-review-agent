@@ -120,6 +120,18 @@ class GitHubClient:
 
         return self._get_paginated(url)
 
+    def get_comment_author_login(self) -> str:
+        """Resolve the expected publisher, not the user who triggered a workflow."""
+        login = os.getenv("GITHUB_COMMENT_AUTHOR")
+        if login is None:
+            # Personal/user tokens support /user; Actions installation tokens do
+            # not. The workflow explicitly supplies github-actions[bot] instead.
+            user = self._get(f"{self.base_url}/user")
+            login = user.get("login") if isinstance(user, dict) else None
+        if not isinstance(login, str) or not login.strip():
+            raise GitHubAPIError("Cannot determine the review comment author")
+        return login.strip()
+
     def _post(self, url, payload):
         try:
             response = requests.post(

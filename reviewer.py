@@ -26,8 +26,15 @@ def build_review_instructions() -> str:
         - correctness bugs
         - regressions
         - important edge cases
-        - maintainability problems
         - security issues when relevant
+
+        Report only actionable defects with a concrete trigger and consequence
+        supported by the supplied code. Do not report stylistic preferences,
+        optional refactors, or hypothetical future callers as defects.
+        Do not claim that an external release, tag, or API does not exist based
+        only on remembered version information; you have no live lookup tool.
+        Missing tests alone are not a defect unless you can identify the actual
+        incorrect behavior that needs a regression test.
 
         Do not assume that code not shown in the diff does not exist.
         Do not report hypothetical issues merely because implementation details
@@ -41,6 +48,10 @@ def build_review_instructions() -> str:
         {schema}
 
         If there are no concrete issues, return an empty issues list.
+        Set "summary" to an empty string. The application builds one overall
+        summary from the collected findings; do not summarize each file.
+        Keep each title short, the description to one or two concise sentences
+        explaining the trigger and impact, and the suggestion to one sentence.
 
         The "line" field should refer to the new version of the file when possible.
         Use null if the line cannot be determined.

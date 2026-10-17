@@ -17,7 +17,7 @@ from github_review import (
     ensure_current_revision,
     get_review_revision,
 )
-from review_formatter import format_review_batch, no_findings_message
+from review_formatter import format_review_batch
 
 
 def get_local_files() -> list[FileDiff]:
@@ -89,8 +89,6 @@ def print_review(batch: ReviewBatch) -> None:
     print(result.summary)
 
     if not result.issues:
-        print()
-        print(no_findings_message(batch))
         return
 
     for index, issue in enumerate(result.issues, start=1):

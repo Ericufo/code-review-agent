@@ -19,6 +19,7 @@ class GitHubCommentManager:
         comments = self.client.get_issue_comments(
             number=pr_number,
         )
+        author_login = self.client.get_comment_author_login()
 
         # Comment pagination can take time: check again just before writing.
         if revision is not None:
@@ -32,7 +33,14 @@ class GitHubCommentManager:
         for comment in comments:
             comment_body = comment.get("body") or ""
 
-            if BOT_MARKER not in comment_body:
+            # A quoted marker is not ownership. Require a dedicated first line
+            # and the publishing account; preserve comments from other authors.
+            if not comment_body or comment_body.splitlines()[0] != BOT_MARKER:
+                continue
+
+            author = comment.get("user") or {}
+            login = author.get("login")
+            if not isinstance(login, str) or login.casefold() != author_login.casefold():
                 continue
 
             comment_id = comment.get("id")

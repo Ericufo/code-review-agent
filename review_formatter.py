@@ -1,18 +1,5 @@
-from review_pipeline import ReviewBatch
-
-
-def no_findings_message(batch: ReviewBatch) -> str:
-    """Describe an empty findings list without implying unreviewed files passed."""
-    if batch.total_files == 0:
-        return "No changed files to review."
-    if batch.reviewed_files == 0:
-        return "No files were successfully reviewed. No conclusion can be drawn."
-    if batch.incomplete:
-        return (
-            "No issues found in the successfully reviewed files. "
-            "Review is incomplete."
-        )
-    return "No issues found in the reviewed changes."
+from review_models import SEVERITY_ORDER
+from review_pipeline import ReviewBatch, build_review_summary
 
 
 def format_review_batch(batch: ReviewBatch) -> str:
@@ -22,39 +9,31 @@ def format_review_batch(batch: ReviewBatch) -> str:
     lines.append("## 🤖 Code Review Agent")
     lines.append("")
 
-    lines.append("### Coverage")
+    lines.append("### Summary")
     lines.append("")
     status = "INCOMPLETE" if batch.incomplete else "COMPLETE"
     lines.append(f"Status: **{status}**")
     lines.append("")
     lines.append(batch.coverage_summary)
     lines.append("")
+    # Derive the overview from structured data even if a caller supplies an old
+    # per-file summary. Do not repeat or expose clean-file model commentary.
+    lines.append(build_review_summary(
+        result.issues, total_files=batch.total_files, reviewed_files=batch.reviewed_files,
+        incomplete=batch.incomplete,
+    ))
+    lines.append("")
 
     if batch.incomplete:
         lines.append("> Review is incomplete; unreviewed files may contain issues.")
         lines.append("")
 
-    for title, problems in (("Failed files", batch.failures), ("Skipped files", batch.skipped)):
-        if problems:
-            lines.extend([f"### {title}", ""])
-            for problem in problems:
-                lines.append(f"- {problem.path}: {problem.reason}")
-            lines.append("")
+    if result.issues:
+        lines.extend(["### Findings", ""])
 
-    if result.summary:
-        lines.extend(["### Summary", "", result.summary, ""])
-
-    lines.append("### Findings")
-    lines.append("")
-
-    if not result.issues:
-        lines.append(no_findings_message(batch))
-        return "\n".join(lines)
-
-    for issue in result.issues:
-        lines.append(
-            f"#### {issue.severity.upper()}"
-        )
+    issues = sorted(result.issues, key=lambda issue: SEVERITY_ORDER.index(issue.severity))
+    for index, issue in enumerate(issues, start=1):
+        lines.append(f"#### {index}. [{issue.severity.upper()}] {issue.title}")
         lines.append("")
 
         location = issue.file
@@ -63,9 +42,6 @@ def format_review_batch(batch: ReviewBatch) -> str:
             location += f":{issue.line}"
 
         lines.append(f"**{location}**")
-        lines.append("")
-
-        lines.append(f"**{issue.title}**")
         lines.append("")
 
         lines.append(issue.description)
@@ -77,4 +53,11 @@ def format_review_batch(batch: ReviewBatch) -> str:
             )
             lines.append("")
 
-    return "\n".join(lines)
+    for title, problems in (("Failed files", batch.failures), ("Skipped files", batch.skipped)):
+        if problems:
+            lines.extend([f"### {title}", ""])
+            for problem in problems:
+                lines.append(f"- {problem.path}: {problem.reason}")
+            lines.append("")
+
+    return "\n".join(lines).rstrip()

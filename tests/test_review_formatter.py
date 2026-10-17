@@ -28,7 +28,7 @@ class TestReviewFormatter(unittest.TestCase):
             "### Summary",
             output
         )
-        self.assertIn(
+        self.assertNotIn(
             "No problems found.",
             output
         )
@@ -36,6 +36,29 @@ class TestReviewFormatter(unittest.TestCase):
             "No issues found in the reviewed changes.",
             output
         )
+        self.assertNotIn("### Findings", output)
+        self.assertEqual(output.count("No issues found"), 1)
+
+    def test_only_problem_files_are_rendered_and_findings_are_sorted(self):
+        issues = [
+            ReviewIssue(severity="low", file="low.py", title="Low defect", description="Low impact"),
+            ReviewIssue(severity="critical", file="critical.py", line=3, title="Critical defect", description="Critical impact"),
+        ]
+        batch = ReviewBatch(
+            result=ReviewResult(summary="clean.py: No issues\ncritical.py: verbose prose", issues=issues),
+            failures=[], skipped=[], total_files=3, reviewed_files=3,
+        )
+
+        output = format_review_batch(batch)
+
+        self.assertIn("Found 2 potential issue(s) across 2 file(s): 1 critical, 1 low.", output)
+        self.assertIn("#### 1. [CRITICAL] Critical defect", output)
+        self.assertIn("#### 2. [LOW] Low defect", output)
+        self.assertIn("critical.py:3", output)
+        self.assertNotIn("clean.py", output)
+        self.assertNotIn("verbose prose", output)
+        self.assertLess(output.index("Critical defect"), output.index("Low defect"))
+        self.assertEqual(batch.result.issues, issues)
 
 
     def test_single_issue_with_line_and_suggestion(self):
@@ -162,6 +185,7 @@ class TestReviewFormatter(unittest.TestCase):
         self.assertIn("Incorrect return value", output)
         self.assertIn("main.py:5", output)
         self.assertIn("image.png: patch unavailable", output)
+        self.assertIn("Findings cover only successfully reviewed files", output)
 
     def test_empty_input_is_not_reported_as_a_clean_review(self):
         output = format_review_batch(ReviewBatch(

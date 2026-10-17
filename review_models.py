@@ -3,6 +3,9 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+SEVERITY_ORDER = ("critical", "high", "medium", "low")
+
+
 class ReviewIssue(BaseModel):
     severity: Literal["critical", "high", "medium", "low"]
     file: str

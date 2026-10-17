@@ -160,6 +160,7 @@ class TestGitHubClient(unittest.TestCase):
     "GITHUB_REPO": "code-review-agent",
 })
 class TestCommentPagination(unittest.TestCase):
+    @patch.dict("os.environ", {"GITHUB_COMMENT_AUTHOR": "github-actions[bot]"})
     @patch("github_client.requests.patch")
     @patch("github_client.requests.post")
     @patch("github_client.requests.get")
@@ -170,7 +171,9 @@ class TestCommentPagination(unittest.TestCase):
         first.json.return_value = [{"id": 10, "body": "Human comment"}]
         first.links = {"next": {"url": next_url}}
         last = Mock()
-        last.json.return_value = [{"id": 123, "body": BOT_MARKER}]
+        last.json.return_value = [{
+            "id": 123, "body": BOT_MARKER, "user": {"login": "github-actions[bot]"},
+        }]
         last.links = {}
         mock_get.side_effect = [first, last]
         client = GitHubClient()
@@ -288,6 +291,42 @@ class TestPRFilePagination(unittest.TestCase):
                 mock_get.return_value = self.response({"changed_files": value})
                 with self.assertRaisesRegex(GitHubAPIError, "valid changed-file count"):
                     GitHubClient().get_pull_request_files(7)
+
+
+@patch.dict("os.environ", {
+    "GITHUB_TOKEN": "fake-token", "GITHUB_OWNER": "owner", "GITHUB_REPO": "repo",
+}, clear=True)
+class TestCommentAuthor(unittest.TestCase):
+    @patch("github_client.requests.get")
+    def test_manual_token_resolves_its_user(self, mock_get):
+        mock_get.return_value.json.return_value = {"login": "Ericufo"}
+        client = GitHubClient()
+
+        self.assertEqual(client.get_comment_author_login(), "Ericufo")
+        mock_get.assert_called_once_with(
+            "https://api.github.com/user", headers=client.headers, timeout=10,
+        )
+
+    @patch.dict("os.environ", {"GITHUB_COMMENT_AUTHOR": "github-actions[bot]"})
+    @patch("github_client.requests.get")
+    def test_actions_author_does_not_use_user_endpoint(self, mock_get):
+        self.assertEqual(GitHubClient().get_comment_author_login(), "github-actions[bot]")
+        mock_get.assert_not_called()
+
+    @patch.dict("os.environ", {"GITHUB_COMMENT_AUTHOR": "   "})
+    @patch("github_client.requests.get")
+    def test_blank_explicit_author_fails_without_fallback(self, mock_get):
+        with self.assertRaisesRegex(GitHubAPIError, "comment author"):
+            GitHubClient().get_comment_author_login()
+        mock_get.assert_not_called()
+
+    @patch("github_client.requests.get")
+    def test_missing_author_is_not_treated_as_a_match(self, mock_get):
+        for data in ({}, {"login": None}, {"login": ""}, {"login": 123}, []):
+            with self.subTest(data=data):
+                mock_get.return_value.json.return_value = data
+                with self.assertRaisesRegex(GitHubAPIError, "comment author"):
+                    GitHubClient().get_comment_author_login()
 
 
 if __name__ == "__main__":

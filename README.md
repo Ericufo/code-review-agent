@@ -50,9 +50,22 @@ python main.py
 python main.py --github-pr 7
 ```
 
-Comments contain the hidden marker `<!-- code-review-agent -->`. Subsequent
-runs update the marked comment; unmarked comments are preserved. If the PR has
-no changed files, the comment is updated to say so instead of retaining old findings.
+Comments start with the hidden marker `<!-- code-review-agent -->` on its own
+line. Subsequent runs update only a comment with that first line and the expected
+author; quoted markers and other authors' comments are preserved. Manual runs
+resolve the token's user through GitHub's `/user` endpoint. The Actions workflow
+explicitly sets `GITHUB_COMMENT_AUTHOR=github-actions[bot]`, because its
+installation token cannot use `/user`. A custom installation-token setup must
+likewise configure the expected publishing login. Switching between a personal
+token and the Actions bot can create separate comments; neither adopts the
+other's comment. If the PR has no changed files, the publisher updates its
+comment to say so instead of retaining old findings.
+
+Reports contain a short overall summary computed from the findings, followed by
+issues ordered by severity. Clean-file summaries are omitted. Failure and skip
+reasons remain visible even when no issues were found. Summary generation does
+not add a model call. The prompt requests concise, actionable findings, but
+these constraints do not guarantee that all model findings are correct.
 
 ## Automatic PR reviews
 
