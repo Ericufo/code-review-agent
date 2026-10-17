@@ -349,6 +349,31 @@ class TestMain(unittest.TestCase):
         self.assertEqual(caught.exception.code, 2)
         self.client_factory.assert_not_called()
 
+    def test_default_engine_and_trace_are_used_by_pr_review(self):
+        exit_code, stdout, stderr = self.run_cli("--github-pr", "7", "--trace")
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Review engine: langgraph", stdout)
+        self.assertIn("[GRAPH] review_file", stderr)
+        self.assertIn("[GRAPH] summarize", stderr)
+        self.assertIn("attempted=1 reviewed=1 failed=0 skipped=0", stderr)
+        body = self.client.create_issue_comment.call_args.kwargs["body"]
+        self.assertNotIn("[GRAPH]", body)
+
+    def test_classic_engine_is_available_as_baseline(self):
+        with patch("review_graph.build_review_graph", side_effect=AssertionError("must not build")):
+            exit_code, stdout, stderr = self.run_cli("--github-pr", "7", "--engine", "classic")
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Review engine: classic", stdout)
+        self.assertEqual(stderr, "")
+        self.review.assert_called_once()
+
+    def test_trace_with_classic_engine_is_rejected_before_any_work(self):
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli("--engine", "classic", "--trace")
+        self.assertEqual(caught.exception.code, 2)
+        self.review.assert_not_called()
+        self.client_factory.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

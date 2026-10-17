@@ -1,8 +1,9 @@
 # Code Review Agent
 
 A Python tool that reviews local Git changes and GitHub pull requests with an
-LLM. V3 adds automatic PR reviews through GitHub Actions, reusable summary
-comments, explicit review coverage, and checks for obsolete results.
+LLM. V4.1 adds LangGraph orchestration and node progress tracing on top of V3's
+automatic PR comments, explicit review coverage, and checks for obsolete results.
+The model still reviews diffs only; repository tools and context are planned next.
 
 ## Features
 
@@ -15,22 +16,36 @@ comments, explicit review coverage, and checks for obsolete results.
 - Records the reviewed head and base commits in the comment
 - Cancels superseded Actions runs and checks revisions before publishing
 - Includes mocked tests that need no API keys or network access
+- Runs a bounded LangGraph workflow, with a classic V3 engine for comparison
+- Shows node transitions and budget counters with `--trace`
 
 ## Setup and manual use
 
 Python 3.10+ and Git are required. Actions uses Python 3.11.
+On Windows with Git Bash:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/Scripts/activate
 python -m pip install -r requirements.txt
-cp .env.example .env
 ```
 
-On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1` and copy the
-configuration with `Copy-Item .env.example .env`.
+On Linux/macOS, use `source .venv/bin/activate` instead. Without activation,
+Windows Git Bash can run the project interpreter as `./.venv/Scripts/python.exe`.
 
-Fill in `.env` for manual use; keep it out of Git:
+Mocked tests need no `.env` or API keys. For live
+manual reviews, supply environment variables or create a local `.env`:
+
+```bash
+# Create only if absent, preserving any existing credentials
+test -e .env || cp .env.example .env
+```
+
+Fill in the needed values below. `main.py` loads `.env` automatically, and
+`.gitignore` excludes it; commit only the empty `.env.example` template.
+Local Git reviews require only `DEEPSEEK_API_KEY`; manual GitHub PR reviews also
+require the three GitHub variables. Actions uses its configured secrets and
+workflow environment, without a local `.env` file.
 
 | Variable | Purpose |
 | --- | --- |
@@ -48,7 +63,22 @@ python main.py
 
 # Review an open, non-draft PR and publish its summary
 python main.py --github-pr 7
+
+# Show LangGraph progress on stderr (local review)
+python main.py --trace
+
+# Use the original loop for comparison
+python main.py --engine classic
+
+# Test the graph with simulated results; no model or GitHub calls
+python -m unittest discover -s tests -p test_review_graph.py -v
 ```
+
+The CLI defaults to `--engine langgraph`. The Python `review_files()` function
+keeps its `classic` default for compatibility; pass `engine="langgraph"` to opt in.
+`--trace` requires the LangGraph engine. It prints filenames and counters, not
+diffs or model responses, and is not included in PR comments. Install updated
+dependencies with `python -m pip install -r requirements.txt` when upgrading V3.
 
 Comments start with the hidden marker `<!-- code-review-agent -->` on its own
 line. Subsequent runs update only a comment with that first line and the expected
@@ -148,7 +178,10 @@ diff_parser.py                              |
                     FileDiff[]
                         |
                 review_pipeline.py
-                  per-file budgets
+              shared budgets / validation
+                        |
+         review_graph.py (default CLI) or classic loop
+          check -> review / skip -> check -> summarize
                         |
                     reviewer.py
                    model request
@@ -209,11 +242,18 @@ behavior. The live checks above are the deployment acceptance step.
 - Rejects PRs beyond GitHub's 3,000-file listing limit
 - Does not automatically review fork, Dependabot, or draft PRs
 - Certain specially quoted local Git filenames are not supported
+- Local Git output is decoded as UTF-8 explicitly, including on Windows. Files
+  in other text encodings must be converted to UTF-8 before local review; invalid
+  bytes produce an input error rather than silently altering the reviewed code.
 
 Roadmap:
 
 - V1: Local Git diff review
 - V2: GitHub PR input
 - V3: Automatic PR summary comments with coverage and revision checks
-- V4: Repository context, controlled agent tools, and review-quality evaluation
-- V5: API service, persisted jobs, workers, and deployment
+- V4.1 (implemented): LangGraph state, conditional routing, bounded iteration,
+  progress tracing, and a classic baseline
+- V4.2 (planned): Controlled tool calling and revision-bound repository context
+- V4.3 (planned): Retrieval experiments, review-quality evaluation, and execution records
+- V4.4 (planned): Minimal API service, persisted task records, and Docker delivery
+- V5 (planned): Durable queues, independent workers, recovery, and deployment scaling

@@ -1,13 +1,14 @@
 import sys
 import subprocess
 import argparse
+import json
 
 from dotenv import load_dotenv
 load_dotenv()
 
 from git_utils import get_git_diff
 from diff_parser import FileDiff, parse_git_diff
-from review_pipeline import ReviewBatch, review_files
+from review_pipeline import ReviewBatch, ReviewStep, review_files
 from github_client import GitHubClient, GitHubAPIError
 from github_comment import GitHubCommentManager
 from github_diff import github_files_to_diff
@@ -56,10 +57,32 @@ def parse_args():
         help="Skip an outdated Actions run if the PR head has changed",
     )
 
+    parser.add_argument(
+        "--engine", choices=("langgraph", "classic"), default="langgraph",
+        help="Review orchestration (default: langgraph; classic keeps the V3 loop)",
+    )
+    parser.add_argument(
+        "--trace", action="store_true",
+        help="Print LangGraph node progress and budget counters to stderr",
+    )
+
     args = parser.parse_args()
     if args.expected_head_sha is not None and args.github_pr is None:
         parser.error("--expected-head-sha requires --github-pr")
+    if args.trace and args.engine != "langgraph":
+        parser.error("--trace requires --engine langgraph")
     return args
+
+
+def print_review_step(step: ReviewStep) -> None:
+    # JSON quoting prevents unusual filenames from adding terminal control lines.
+    path = json.dumps(step.path, ensure_ascii=True)
+    print(
+        f"[GRAPH] {step.node} path={path} attempted={step.attempted} "
+        f"reviewed={step.reviewed} failed={step.failed} skipped={step.skipped} "
+        f"diff_chars={step.used_chars}",
+        file=sys.stderr,
+    )
 
 def post_github_comment(
     client: GitHubClient,
@@ -147,7 +170,8 @@ def main() -> int:
         print("No changes to review.")
         return 0
 
-    print("=== Code Review Agent V3 ===")
+    print("=== Code Review Agent V4.1 ===")
+    print(f"Review engine: {args.engine}")
     print(f"Reviewing {source}...")
     print(f"Reviewing {len(file_diffs)} changed file(s)...")
     if client is not None:
@@ -155,7 +179,10 @@ def main() -> int:
         print(f"Base commit: {revision.base_sha}")
 
     try:
-        batch = review_files(file_diffs)
+        batch = review_files(
+            file_diffs, engine=args.engine,
+            on_step=print_review_step if args.trace else None,
+        )
 
     except Exception as exc:
         print(f"Review failed: {exc}", file=sys.stderr)
