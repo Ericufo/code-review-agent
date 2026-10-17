@@ -203,7 +203,7 @@ behavior. The live checks above are the deployment acceptance step.
 
 - Reviews diffs rather than full repository context; findings can be incorrect
 - Publishes a conversation summary, not inline review comments
-- Makes at most 30 model calls, with 20,000 characters per diff and 80,000
+- Makes at most 30 model calls, with 20,000 characters per diff and 160,000
   characters total; skipped files remain visible in coverage
 - Cannot review binary, empty, or otherwise unavailable patches as text
 - Rejects PRs beyond GitHub's 3,000-file listing limit

@@ -9,7 +9,7 @@ from reviewer import review_diff
 
 MAX_FILES = 30
 MAX_FILE_CHARS = 20_000
-MAX_TOTAL_CHARS = 80_000
+MAX_TOTAL_CHARS = 160_000
 
 
 def build_review_summary(
