@@ -31,6 +31,7 @@ class SearchCodeArgs(BaseModel):
     version: Literal['head', 'base'] = 'head'
     path: str | None = None
     offset: int = Field(default=0, ge=0)
+    context_lines: int = Field(default=0, ge=0, le=20)
 
     @model_validator(mode='after')
     def valid_query(self):
@@ -47,7 +48,7 @@ TOOL_SCHEMAS = [
      'description': description}
     for name, model, description in (
         ('read_file', ReadFileArgs, 'Read source lines at head or base. Each page contains at most 120 lines and 12000 characters, even if a larger range is requested. Check has_more and pass next_start_line to continue; end_line clamps at EOF. Cite only returned lines.'),
-        ('search_code', SearchCodeArgs, 'Literal case-sensitive source search at head or base. Optional path restricts to one file. Results page at 20 matches or 12000 characters; pass next_offset as offset to continue. has_more means results are NOT exhaustive. No regex or shell.'),
+        ('search_code', SearchCodeArgs, 'Literal case-sensitive source search at head or base. Optional path restricts to one file; context_lines adds up to 20 surrounding lines on each side to inspect definitions/signatures in one call. Context may shrink to fit the page; check context_truncated and the actual evidence range. Results page at 20 matches or 12000 characters; pass next_offset as offset to continue (offset counts matches, not source lines). has_more means results are NOT exhaustive. No regex or shell.'),
     )
 ]
 
@@ -57,7 +58,7 @@ class ModelBudgetError(ContextError):
 
 
 MAX_FILE_ROUNDS = 6
-MAX_FILE_TOOL_CALLS = 8
+MAX_FILE_TOOL_CALLS = 12
 MAX_TOOL_RESULT_CHARS = 12_000
 
 
@@ -178,12 +179,24 @@ class ToolSession:
             matched = 0
             for path in paths:
                 self.check_time()
-                for number, line in enumerate(self.context.read(path, args.version).splitlines(), 1):
+                lines = self.context.read(path, args.version).splitlines()
+                for number, line in enumerate(lines, 1):
                     if args.query in line:
                         matched += 1
                         if matched <= args.offset:
                             continue
-                        entries.append(entry(path, number, number, [line]))
+                        radius = args.context_lines
+                        def match_entry():
+                            start, end = max(1, number - radius), min(len(lines), number + radius)
+                            return {**entry(path, start, end, lines[start - 1:end]),
+                                    'match_line': number,
+                                    'context_truncated': radius < args.context_lines}
+                        entries.append(match_entry())
+                        # Keep the matching line, shrinking optional neighbors
+                        # before treating the next match as a new page.
+                        while len(entries) <= 20 and not fits() and radius > 0:
+                            radius -= 1
+                            entries[-1] = match_entry()
                         if len(entries) > 20 or not fits():
                             entries.pop()
                             if not entries:

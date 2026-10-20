@@ -7,7 +7,7 @@ from context_review import review_with_context
 from diff_parser import FileDiff
 from repository_context import ContextError
 from review_pipeline import review_files
-from review_tools import ContextBudget, ModelBudgetError, ToolSession
+from review_tools import ContextBudget, ModelBudgetError, ToolSession, MAX_FILE_TOOL_CALLS
 from test_context_review import response, call
 from test_review_tools import context
 
@@ -202,14 +202,15 @@ class TestContextReliability(unittest.TestCase):
         self.assertEqual(model.call_count, 1)
 
     def test_excess_tool_batch_returns_denials_without_exceeding_execution_budget(self):
-        requests = [call('search_code', {'query': f'query{i}'}, str(i)) for i in range(9)]
+        requests = [call('search_code', {'query': f'query{i}'}, str(i))
+                    for i in range(MAX_FILE_TOOL_CALLS + 1)]
         model = Mock(side_effect=[response(*requests), response()])
         budget = ContextBudget()
         with self.assertRaisesRegex(ContextError, 'context incomplete'):
             review_with_context('diff', context=context(), budget=budget, request_fn=model)
-        self.assertEqual(budget.tool_calls, 8)
+        self.assertEqual(budget.tool_calls, MAX_FILE_TOOL_CALLS)
         self.assertEqual(len([item for item in model.call_args.args[0]
-                              if item.get('type') == 'function_call_output']), 9)
+                              if item.get('type') == 'function_call_output']), MAX_FILE_TOOL_CALLS + 1)
 
     def test_diff_only_prompt_does_not_require_context_evidence(self):
         from reviewer import build_review_instructions

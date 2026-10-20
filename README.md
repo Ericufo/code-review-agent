@@ -138,21 +138,26 @@ Repository mode defaults to these independent batch budgets:
 | Returned tool context characters | 256,000 | `--max-context-chars` |
 | Cumulative serialized input characters, including instructions, tools and replayed history | 2,000,000 | `--max-input-chars` |
 
-The file limit remains 30. Each file permits 6 model turns, 8 tool executions and
+The file limit remains 30. Each file permits 6 model turns, 12 tool executions and
 48,000 context characters. The CLI explains when the configured call budget cannot
 cover six rounds for every candidate (other limits may bind earlier).
 Reads return at most 120 lines per page, even for larger
 requested ranges. Results page at 12,000
 characters, shrinking further to fit the remaining file/batch context budget;
 searches also page at 20 matches and accept an optional exact `path`
-filter and `offset`. Check `has_more` and use `next_start_line` / `next_offset` to
+filter and `offset`. Optional `context_lines` (0–20, default 0) includes nearby
+lines so a definition and its signature can be inspected in one call. Search
+entries identify `match_line`; `context_truncated` means optional neighbors were
+reduced to fit the budget. Evidence covers only the lines actually returned.
+Offsets count matches, even when context ranges overlap.
+Check `has_more` and use `next_start_line` / `next_offset` to
 continue. Pages contain only complete lines and evidence describes only returned
 ranges. Partial search results are not exhaustive. A single oversized line/match
 or an exhausted cumulative context budget still fails explicitly. Reads clamp at
 EOF and report the actual line count.
 
 The last available model turn is reserved for a final answer. Tools are removed
-from that request, also when at most one tool call remains; `--trace` shows
+from that request, also when no tool calls remain; `--trace` shows
 `finalize_request`. Each request explains its remaining budgets and recommends
 short, targeted reads. Final responses must explicitly report `context_complete`;
 missing essential context stays incomplete, even with an empty issue list.
@@ -232,7 +237,7 @@ assumes collaborators who can push branches are trusted. The event is
 - Closed/draft PRs and superseded runs are explicitly skipped with code `0` and
   do not publish. A successful check alone does not prove a review ran; check the
   log and the comment's commit SHA.
-- Each review job has a 20-minute timeout. A cancelled or timed-out job may leave
+- Each review job has a 30-minute timeout. A cancelled or timed-out job may leave
   the previous comment in place; its recorded SHA identifies its age.
 
 To retry after fixing configuration or a transient failure, use **Re-run jobs**
@@ -253,15 +258,24 @@ Actions invokes:
 ```bash
 python main.py --github-pr "$PR_NUMBER" --expected-head-sha "$EXPECTED_HEAD_SHA" \
   --context repo --trace \
-  --max-model-calls 64 --max-tool-calls 160 \
-  --max-context-chars 256000 --max-input-chars 2000000
+  --max-model-calls 128 --max-tool-calls 256 \
+  --max-context-chars 800000 --max-input-chars 6000000
 ```
 
-These are batch limits, not a promise to finish every PR size. On 2026-10-20, a
-preselected three-file local batch completed within these defaults (15 model
-requests, 22 tool calls). Larger-batch failures remain documented. The workflow
-configuration has passed static validation; an actual run after pushing this
-version is still required to validate hosted execution and comment publication.
+Actions uses these explicit larger limits; the CLI defaults above remain unchanged.
+These are batch limits, not a promise to finish every PR size. On 2026-10-20,
+[PR #4's first hosted run](https://github.com/Ericufo/code-review-agent/actions/runs/39398900386)
+updated its summary comment but exited with `INCOMPLETE`: 6/21 eligible files
+reviewed, 4 failed, 11 skipped, and 4 excluded. Two failures reported missing
+context; two failures and all skips hit the old 2,000,000 input-character limit.
+The run consumed 47/64 model requests, so model-call exhaustion was not the
+immediate cause. The larger Actions limits address that observed batch size;
+the model can now use its last remaining tool call before the reserved final
+answer turn. A subsequent full-PR, no-publish run with the first repair completed
+15/21 files with no skips (93 requests, 3,674,723 input characters); its six
+failures all concerned the former eight-tool per-file limit or missing context.
+The second repair adds bounded search context and raises that per-file limit to
+12. A new hosted run is still needed to validate the updated configuration.
 
 Manual reviews also check revisions, starting from the current head rather than
 an event's expected head. Base-only updates and retargeting are not automatic
@@ -321,13 +335,24 @@ skipped. `PullRequestRevision` identifies the head/base pair being reviewed.
 
 ## Validation
 
-Latest validation (2026-10-20): the files eligible for commit were copied to an
-isolated directory without `experiments/`, `docs/` or `.env`. All 172 agent tests
-ran: 171 passed and one Windows symlink-permission test was skipped. Two tests
-of local experimental scripts remain outside the CI suite. Both workflows
-passed actionlint. The live
-three-file batch completed; hosted Actions execution and comment publication
-for this version remain pending.
+Validation on 2026-10-20: the initial Python Tests workflow passed in Ubuntu Actions.
+After the Actions failure investigation, 176 tests ran locally: 175 passed and
+one Windows symlink-permission test was skipped. New regressions cover the last
+available tool call, search context and evidence bounds, budget shrinking and
+pagination with overlapping context. The final model turn remains reserved.
+Both workflows passed actionlint, and the updated review command was parsed
+with the actual CLI. Two tests of local
+experimental scripts remain outside the CI suite. Hosted comment publication
+worked for the initial run, but full-PR completion and hosted validation of the
+repair remain separate acceptance checks.
+
+The second repair has not passed live acceptance. Its six-file diagnostic ended
+with six failures; the local diagnostic writer then failed to serialize the
+Pydantic result, so individual failure reasons were not saved. After fixing the
+writer, a one-file probe failed on its first request with `APIConnectionError`;
+a separate model-service connectivity check returned an SSL error. These records
+do not establish the second repair's live coverage. They are retained locally
+alongside the earlier full-PR result rather than reported as successful reviews.
 
 ```bash
 python -m unittest discover -s tests -v

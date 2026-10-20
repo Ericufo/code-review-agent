@@ -7,7 +7,7 @@ from context_review import review_with_context
 from diff_parser import FileDiff
 from repository_context import ContextError
 from review_pipeline import review_files
-from review_tools import ContextBudget
+from review_tools import ContextBudget, MAX_FILE_TOOL_CALLS
 from test_review_tools import context
 
 
@@ -121,10 +121,10 @@ class TestContextReview(unittest.TestCase):
             request_context_model([], 'final', tools_enabled=False)
         self.assertEqual(client.return_value.__enter__.return_value.responses.create.call_args.kwargs['tools'], [])
 
-    def test_eight_tool_calls_finish_without_a_ninth_tool_request(self):
+    def test_full_tool_budget_finishes_without_an_extra_tool_request(self):
         events = []
-        calls = [call('search_code', {'query': query}, call_id=str(i))
-                 for i, query in enumerate(['lookup', 'return', 'name', 'missing', 'x', 'def', 'None', 'from'])]
+        calls = [call('search_code', {'query': f'query{i}'}, call_id=str(i))
+                 for i in range(MAX_FILE_TOOL_CALLS)]
         model = Mock(side_effect=[response(*calls), response()])
         result = review_with_context('diff', context=context(), budget=ContextBudget(),
                                      request_fn=model, on_event=events.append)
@@ -138,6 +138,32 @@ class TestContextReview(unittest.TestCase):
         review_with_context('diff', context=context(), budget=ContextBudget(), request_fn=model, max_rounds=2)
         self.assertFalse(model.call_args_list[-1].kwargs['tools_enabled'])
         self.assertIn('FINAL ANSWER TURN', model.call_args.args[1])
+
+    def test_last_tool_call_is_available_before_reserved_final_round(self):
+        # The hosted run left one call unused and could not read the remaining
+        # evidence. Check the boundary independently of the configured cap.
+        calls = [call('search_code', {'query': f'query{i}'}, call_id=str(i))
+                 for i in range(MAX_FILE_TOOL_CALLS - 1)]
+        def model(inputs, instructions, *, tools_enabled=True):
+            if mock.call_count == 1:
+                return response(*calls)
+            if mock.call_count == 2:
+                self.assertTrue(tools_enabled)
+                self.assertIn('Remaining tool calls: 1', instructions)
+                return response(call(call_id='last'))
+            self.assertFalse(tools_enabled)
+            evidence = json.loads(next(item['output'] for item in inputs
+                                       if item.get('call_id') == 'last'
+                                       and item['type'] == 'function_call_output'))['entries'][0]['evidence']
+            return response(result={'issues': [{
+                'severity': 'high', 'file': 'app.py', 'title': 'Null access',
+                'description': 'Lookup can return None.', 'evidence': [evidence],
+            }]})
+        mock, budget = Mock(side_effect=model), ContextBudget()
+        result = review_with_context('diff', context=context(), budget=budget,
+                                     request_fn=mock, max_rounds=3)
+        self.assertEqual((budget.model_calls, budget.tool_calls), (3, MAX_FILE_TOOL_CALLS))
+        self.assertEqual(result.issues[0].evidence[0].path, 'dep.py')
 
     def test_final_answer_cannot_hide_insufficient_context(self):
         model = Mock(side_effect=[response(call()), response(result={

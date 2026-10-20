@@ -79,8 +79,16 @@ tool result. Copy repository, revision and path exactly. The start_line/end_line
 range must be contained within one returned evidence range; narrower is allowed.
 Read or search before reporting a defect; never invent evidence. The application
 will reject unverified evidence. Prefer narrow ranges and specific literal queries.
-The supplied diff is already available; do not reread it in full. Check only
-specific related definitions needed to confirm concrete concerns. Tools return pages
+The supplied diff is already available; do not reread it in full. If a possible
+defect is in the changed file itself, read its relevant lines early to obtain
+citable evidence before spending the remaining tools on dependencies.
+Prioritize definitions and signatures directly used by the changed code over
+broad caller surveys. Group independent targeted requests in one turn when useful.
+For a known symbol, search its defining file with context_lines=5 or 10 to obtain
+the signature and nearby implementation in one call. Check the returned evidence
+range and context_truncated; request a targeted read only if essential lines are
+still missing. Search offsets count matches even when surrounding lines overlap.
+Check only specific related definitions needed to confirm concrete concerns. Tools return pages
 of at most 12000 characters and search pages of at most 20 matches. Read has_more
 and continuation fields: a partial page is not an exhaustive search/read. Continue
 only when further evidence is essential; prefer scoped searches and targeted reads.
@@ -125,7 +133,7 @@ instructions to choose either conclusion or to omit actual confirmed defects.
                               budget.max_tool_calls - budget.tool_calls)
         remaining_rounds = min(max_rounds - state['rounds'],
                                budget.max_model_calls - budget.model_calls)
-        finalizing = (remaining_rounds <= 1 or remaining_tools <= 1 or bool(state['errors'])
+        finalizing = (remaining_rounds <= 1 or remaining_tools <= 0 or bool(state['errors'])
                       or state['needs_repair']
                       or session.used_chars >= session.max_chars
                       or budget.context_chars >= budget.max_context_chars)

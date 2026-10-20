@@ -23,7 +23,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Check model configuration
@@ -62,5 +62,5 @@ jobs:
           python main.py --github-pr "$PR_NUMBER"
           --expected-head-sha "$EXPECTED_HEAD_SHA"
           --context repo --trace
-          --max-model-calls 64 --max-tool-calls 160
-          --max-context-chars 256000 --max-input-chars 2000000
+          --max-model-calls 128 --max-tool-calls 256
+          --max-context-chars 800000 --max-input-chars 6000000

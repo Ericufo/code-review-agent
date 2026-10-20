@@ -44,9 +44,62 @@ class TestReviewTools(unittest.TestCase):
              ('read_file', '{"path":"dep.py","start_line":true,"end_line":2}'),
              ('read_file', '{"path":"dep.py","start_line":2,"end_line":1}'),
              ('read_file', '{"path":"dep.py","start_line":1,"end_line":2,"extra":1}'),
+             ('search_code', '{"query":"lookup","context_lines":21}'),
+             ('search_code', '{"query":"lookup","context_lines":-1}'),
+             ('search_code', '{"query":"lookup","context_lines":true}'),
              ('search_code', '{"query":""}'), ('search_code', '{"query":"x","version":"other"}')]:
             with self.subTest(name=name, args=args), self.assertRaises(ContextError):
                 ToolSession(context(), ContextBudget()).execute(name, args)
+
+    def test_search_neighbors_supply_citable_signature_and_body_at_pinned_version(self):
+        session = ToolSession(context(), ContextBudget())
+        payload = session.execute('search_code', json.dumps({
+            'query': 'def lookup', 'path': 'dep.py', 'version': 'base', 'context_lines': 5}))
+        match = json.loads(payload)['entries'][0]
+        self.assertEqual(match['text'], '1: def lookup():\n2:     return object()')
+        self.assertEqual(match['match_line'], 1)
+        self.assertFalse(match['context_truncated'])
+        self.assertEqual(match['evidence'], {
+            'repository': 'test/repo', 'revision': 'b' * 40, 'path': 'dep.py',
+            'start_line': 1, 'end_line': 2})
+        result = ReviewResult(summary='', issues=[ReviewIssue(
+            severity='high', file='app.py', title='x', description='x',
+            evidence=[ContextEvidence(**{**match['evidence'], 'start_line': 2})])])
+        session.validate_evidence(result)
+        self.assertEqual(session.used_chars, len(payload))
+
+    def test_search_neighbors_shrink_to_budget_without_citing_omitted_lines(self):
+        ctx = context()
+        ctx.files['head']['long.py'] = 'x' * 3000 + '\nneedle\n' + 'y' * 3000
+        session = ToolSession(ctx, ContextBudget(max_context_chars=1000))
+        payload = session.execute('search_code', json.dumps({
+            'query': 'needle', 'path': 'long.py', 'context_lines': 1}))
+        match = json.loads(payload)['entries'][0]
+        self.assertLessEqual(len(payload), 1000)
+        self.assertTrue(match['context_truncated'])
+        self.assertEqual(match['text'], '2: needle')
+        self.assertEqual((match['evidence']['start_line'], match['evidence']['end_line']), (2, 2))
+        self.assertEqual(session.evidence[0].start_line, 2)
+        self.assertEqual(session.evidence[0].end_line, 2)
+
+    def test_search_neighbor_pagination_counts_matches_even_with_overlapping_ranges(self):
+        ctx = context()
+        ctx.files['head']['many.py'] = 'needle\n' * 25
+        session = ToolSession(ctx, ContextBudget())
+        entries, offset = [], 0
+        while True:
+            page = json.loads(session.execute('search_code', json.dumps({
+                'query': 'needle', 'path': 'many.py', 'context_lines': 2, 'offset': offset})))
+            entries.extend(page['entries'])
+            if not page['has_more']:
+                break
+            offset = page['next_offset']
+            self.assertEqual(offset, len(entries))
+        self.assertEqual([item['match_line'] for item in entries], list(range(1, 26)))
+        for item in entries:
+            evidence = item['evidence']
+            self.assertLessEqual(evidence['start_line'], item['match_line'])
+            self.assertGreaterEqual(evidence['end_line'], item['match_line'])
 
     def test_repeated_calls_charge_budget_and_stop(self):
         session = ToolSession(context(), ContextBudget())
