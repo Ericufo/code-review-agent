@@ -19,6 +19,11 @@ from github_review import (
     get_review_revision,
 )
 from review_formatter import format_review_batch
+from repository_context import capture_local_context, GitHubRepositoryContext, allowed_path
+from review_tools import ContextBudget, MAX_FILE_ROUNDS
+
+
+CONTEXT_BUDGET_OPTIONS = ('max_model_calls', 'max_input_chars', 'max_context_chars', 'max_tool_calls')
 
 
 def get_local_files() -> list[FileDiff]:
@@ -40,6 +45,16 @@ def get_github_files(client: GitHubClient, pr_number: int) -> list[FileDiff]:
     )
 
     return github_files_to_diff(files)
+
+
+def select_local_files(files: list[FileDiff], paths: list[str] | None) -> list[FileDiff]:
+    if paths is None:
+        return files
+    requested = set(paths)
+    missing = requested - {item.path for item in files}
+    if missing:
+        raise ValueError('Selected paths must have current Git changes: ' + json.dumps(sorted(missing)))
+    return [item for item in files if item.path in requested]
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -65,12 +80,32 @@ def parse_args():
         "--trace", action="store_true",
         help="Print LangGraph node progress and budget counters to stderr",
     )
+    parser.add_argument(
+        "--context", choices=("diff", "repo"), default="diff",
+        help="V4.2: enable bounded repository tools with repo (default: diff-only)",
+    )
+    defaults = ContextBudget()
+    parser.add_argument('--paths', nargs='+', help='Local only: review these exact Git paths; context may include other source files')
+    parser.add_argument('--no-publish', action='store_true', help='PR only: review without creating or updating a comment')
+    for option in CONTEXT_BUDGET_OPTIONS:
+        parser.add_argument('--' + option.replace('_', '-'), type=int, default=None,
+            help=f"Batch {option[4:].replace('_', ' ')} budget for --context repo (default: {getattr(defaults, option)})")
 
     args = parser.parse_args()
+    if args.paths is not None and args.github_pr is not None:
+        parser.error('--paths is local-only; a partial selection must not appear as a full PR review')
+    if args.no_publish and args.github_pr is None:
+        parser.error('--no-publish requires --github-pr')
     if args.expected_head_sha is not None and args.github_pr is None:
         parser.error("--expected-head-sha requires --github-pr")
     if args.trace and args.engine != "langgraph":
         parser.error("--trace requires --engine langgraph")
+    if args.context == "repo" and args.engine != "langgraph":
+        parser.error("--context repo requires --engine langgraph")
+    for option in CONTEXT_BUDGET_OPTIONS:
+        value = getattr(args, option)
+        if value is not None and (args.context != 'repo' or value < 1):
+            parser.error('--' + option.replace('_', '-') + ' requires --context repo and a positive integer')
     return args
 
 
@@ -79,8 +114,11 @@ def print_review_step(step: ReviewStep) -> None:
     path = json.dumps(step.path, ensure_ascii=True)
     print(
         f"[GRAPH] {step.node} path={path} attempted={step.attempted} "
-        f"reviewed={step.reviewed} failed={step.failed} skipped={step.skipped} "
-        f"diff_chars={step.used_chars}",
+        f"reviewed={step.reviewed} failed={step.failed} skipped={step.skipped} excluded={step.excluded} "
+        f"diff_chars={step.used_chars} model_calls={step.model_calls}/{step.model_limit} "
+        f"tool_calls={step.tool_calls}/{step.tool_limit} "
+        f"context_chars={step.context_chars}/{step.context_limit} "
+        f"input_chars={step.input_chars}/{step.input_limit}",
         file=sys.stderr,
     )
 
@@ -106,7 +144,7 @@ def print_review(batch: ReviewBatch) -> None:
     result = batch.result
     print()
     print("=== Review Result ===")
-    status = "INCOMPLETE" if batch.incomplete else "COMPLETE"
+    status = batch.status
     print(f"Status: {status}")
     print(batch.coverage_summary)
     print(result.summary)
@@ -131,11 +169,15 @@ def print_review(batch: ReviewBatch) -> None:
 
         if issue.suggestion:
             print(f"   Suggestion: {issue.suggestion}")
+        for evidence in issue.evidence:
+            print(f"   Evidence: {evidence.repository}@{evidence.revision} "
+                  f"{evidence.path}:{evidence.start_line}-{evidence.end_line}")
 
 
 def main() -> int:
     args = parse_args()
     client = None
+    context = None
 
     try:
         if args.github_pr is not None:
@@ -146,10 +188,19 @@ def main() -> int:
             file_diffs = get_github_files(client, args.github_pr)
             # Reject a mixed file list even if its file count stayed the same.
             ensure_current_revision(client, args.github_pr, revision)
+            if args.context == "repo" and file_diffs:
+                context = GitHubRepositoryContext(client, revision)
             source = f"GitHub PR #{args.github_pr}"
         else:
-            file_diffs = get_local_files()
+            if args.context == "repo":
+                context = capture_local_context()
+            all_local_files = get_local_files()
+            file_diffs = select_local_files(all_local_files, args.paths)
+            if context is not None:
+                context.ensure_unchanged()
             source = "current Git changes"
+            if args.paths is not None:
+                source = 'selected local changes ' + json.dumps([item.path for item in file_diffs])
 
     except ReviewSupersededError as exc:
         print(f"Review skipped: {exc}")
@@ -170,10 +221,24 @@ def main() -> int:
         print("No changes to review.")
         return 0
 
-    print("=== Code Review Agent V4.1 ===")
+    print("=== Code Review Agent V4.2 ===")
     print(f"Review engine: {args.engine}")
+    print(f"Context mode: {args.context}")
+    if context is not None:
+        print(f"Context revision: {context.revisions['head']}")
+        limits = ContextBudget(**{key: getattr(args, key) for key in CONTEXT_BUDGET_OPTIONS
+                                 if getattr(args, key) is not None})
+        print('Context budgets: ' + ', '.join(f'{key}={getattr(limits, key)}' for key in CONTEXT_BUDGET_OPTIONS))
     print(f"Reviewing {source}...")
-    print(f"Reviewing {len(file_diffs)} changed file(s)...")
+    excluded_count = sum(not allowed_path(item.path) for item in file_diffs) if context is not None else 0
+    candidate_count = len(file_diffs) - excluded_count
+    print(f"Detected {len(file_diffs)} changed file(s); candidates: {candidate_count}; excluded: {excluded_count}.")
+    if args.paths is not None:
+        print(f"Selection covers {len(file_diffs)}/{len(all_local_files)} detected local changes; other changes are not reviewed.")
+    if context is not None and candidate_count * MAX_FILE_ROUNDS > limits.max_model_calls:
+        print(f"Budget note: {candidate_count} candidates can require up to {candidate_count * MAX_FILE_ROUNDS} model requests "
+              f"at {MAX_FILE_ROUNDS} rounds per file; configured limit is {limits.max_model_calls}. "
+              "Use smaller local --paths batches or explicit budget overrides; other limits still apply.")
     if client is not None:
         print(f"Reviewed commit: {revision.head_sha}")
         print(f"Base commit: {revision.base_sha}")
@@ -182,7 +247,16 @@ def main() -> int:
         batch = review_files(
             file_diffs, engine=args.engine,
             on_step=print_review_step if args.trace else None,
+            context=context,
+            **({key: getattr(args, key) for key in CONTEXT_BUDGET_OPTIONS if getattr(args, key) is not None}
+               if context is not None else {}),
         )
+        if context is not None and client is None:
+            context.ensure_unchanged()
+            if select_local_files(get_local_files(), args.paths) != file_diffs:
+                raise RuntimeError("Local diff changed during review; rerun required")
+        if client is not None and args.no_publish:
+            ensure_current_revision(client, args.github_pr, revision)
 
     except Exception as exc:
         print(f"Review failed: {exc}", file=sys.stderr)
@@ -191,7 +265,7 @@ def main() -> int:
     print_review(batch)
 
     publish_failed = False
-    if args.github_pr is not None:
+    if args.github_pr is not None and not args.no_publish:
         try:
             action = post_github_comment(
                 client,
@@ -211,6 +285,12 @@ def main() -> int:
                 f"Failed to post GitHub comment: {exc}",
                 file=sys.stderr,
             )
+
+    if args.no_publish:
+        print('PR review only: no comment published.')
+
+    for problem in batch.excluded:
+        print(f"[EXCLUDED] {problem.path}: {problem.reason}")
 
     for problem in batch.failures:
         print(

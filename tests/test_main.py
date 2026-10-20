@@ -86,6 +86,23 @@ class TestMain(unittest.TestCase):
         self.assertNotIn("First finding", updated["body"])
         self.assertNotIn("### Findings", updated["body"])
 
+    def test_pr_no_publish_rechecks_revision_without_comment_calls(self):
+        code, stdout, stderr = self.run_cli('--github-pr', '7', '--no-publish')
+        self.assertEqual(code, 0)
+        self.assertIn('no comment published', stdout)
+        self.assertEqual(self.client.get_pull_request.call_count, 3)
+        self.client.get_issue_comments.assert_not_called()
+        self.client.create_issue_comment.assert_not_called()
+        self.client.update_issue_comment.assert_not_called()
+
+    def test_pr_no_publish_discards_superseded_result(self):
+        self.client.get_pull_request.side_effect = [self.metadata, self.metadata,
+            {**self.metadata, 'head': {'sha': 'c' * 40}}]
+        code, stdout, stderr = self.run_cli('--github-pr', '7', '--no-publish')
+        self.assertEqual(code, 1)
+        self.assertNotIn('=== Review Result ===', stdout)
+        self.client.create_issue_comment.assert_not_called()
+
     def test_comment_failures_return_nonzero_without_success_message(self):
         for operation in (
             "get_issue_comments", "get_comment_author_login", "create_issue_comment", "update_issue_comment"
@@ -264,6 +281,17 @@ class TestMain(unittest.TestCase):
         body = self.client.update_issue_comment.call_args.kwargs["body"]
         self.assertIn("Reviewed 0/0 file(s)", body)
         self.assertNotIn("Old findings", body)
+
+    def test_empty_pr_with_context_budget_still_publishes_empty_summary(self):
+        self.client.get_pull_request_files.return_value = []
+        exit_code, stdout, stderr = self.run_cli(
+            '--github-pr', '7', '--context', 'repo', '--max-model-calls', '64',
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, '')
+        self.assertIn('No changed files to review', stdout)
+        self.review.assert_not_called()
+        self.client.create_issue_comment.assert_called_once()
 
     def test_empty_local_diff_does_not_review_or_publish(self):
         with patch("main.get_local_files", return_value=[]):

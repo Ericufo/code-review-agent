@@ -1,16 +1,17 @@
 # Code Review Agent
 
 A Python tool that reviews local Git changes and GitHub pull requests with an
-LLM. V4.1 adds LangGraph orchestration and node progress tracing on top of V3's
-automatic PR comments, explicit review coverage, and checks for obsolete results.
-The model still reviews diffs only; repository tools and context are planned next.
+LLM. V4.2 adds opt-in, bounded repository tools to V4.1's LangGraph workflow.
+Models can read source lines and search code at a pinned revision; findings cite
+validated context evidence. The local CLI defaults to diff-only; the PR Review
+workflow explicitly enables repository context.
 
 ## Features
 
 - Reviews tracked and untracked local changes, or the changed files of a PR
 - Validates structured findings with Pydantic
 - Preserves successful results when other files fail
-- Reports reviewed, failed, and skipped file counts with reasons
+- Reports reviewed, failed, skipped, and scope-excluded file counts with reasons
 - Paginates GitHub file/comment lists and rejects incomplete file retrieval
 - Creates a marked PR summary comment and updates it on subsequent runs
 - Records the reviewed head and base commits in the comment
@@ -18,6 +19,9 @@ The model still reviews diffs only; repository tools and context are planned nex
 - Includes mocked tests that need no API keys or network access
 - Runs a bounded LangGraph workflow, with a classic V3 engine for comparison
 - Shows node transitions and budget counters with `--trace`
+- Enables read-only `read_file` / `search_code` with `--context repo`
+- Pins PR tools to head/base Git objects and local tools to an in-memory snapshot
+- Checks evidence against actual tool results and treats tool errors as incomplete
 
 ## Setup and manual use
 
@@ -54,7 +58,8 @@ workflow environment, without a local `.env` file.
 | `GITHUB_OWNER` | Target repository owner |
 | `GITHUB_REPO` | Target repository name, without the owner prefix |
 
-The model configuration is in `reviewer.py`. Diff contents are sent to the
+The model configuration is in `reviewer.py` (diff-only) and `context_review.py`
+(repository mode). Diff contents and requested source context are sent to the
 external model API.
 
 ```bash
@@ -66,6 +71,15 @@ python main.py --github-pr 7
 
 # Show LangGraph progress on stderr (local review)
 python main.py --trace
+
+# V4.2: review using bounded repository tools
+python main.py --context repo --trace
+
+# Optional explicit budgets for a larger run (characters, not tokens)
+python main.py --context repo --max-model-calls 96 --max-input-chars 3000000 --max-context-chars 384000 --max-tool-calls 192 --trace
+
+# Same tool flow on a PR; this command publishes a summary comment
+python main.py --github-pr 7 --context repo --trace
 
 # Use the original loop for comparison
 python main.py --engine classic
@@ -79,6 +93,90 @@ keeps its `classic` default for compatibility; pass `engine="langgraph"` to opt 
 `--trace` requires the LangGraph engine. It prints filenames and counters, not
 diffs or model responses, and is not included in PR comments. Install updated
 dependencies with `python -m pip install -r requirements.txt` when upgrading V3.
+
+`--context repo` requires `--engine langgraph`. It sends selected repository
+source to the external model as well as the diff. No extra dependency is needed
+when upgrading V4.1. The PR Review workflow explicitly enables `--context repo`
+with bounded budgets and `--trace`. The Chinese walkthrough
+(`docs/v4-part2-walkthrough.md`) and closeout record (`docs/v4.2-closeout.md`)
+are local learning notes: `docs/` is intentionally ignored and is not included
+in a fresh clone. Development probes, synthetic cases and raw run records in
+`experiments/` are also local-only; the agent and its CI tests do not depend on them.
+
+Repository mode permits common source extensions (Python, JS/TS, Java, C#, Go,
+Rust, C/C++, Ruby, PHP, Swift, Kotlin and SQL). Hidden paths, secret/credential
+filenames, dependency directories and other extensions are excluded. This is a
+path policy, not a scanner for secrets hardcoded inside otherwise allowed code.
+Excluded changed files appear separately as `EXCLUDED`, before patch/size/budget
+checks, and are removed from the eligible coverage denominator. They do not make
+a batch incomplete. Eligible failures or budget skips still produce `INCOMPLETE`;
+an empty eligible set produces `NO_ELIGIBLE_FILES`, not a claim that code was reviewed.
+Search absence applies only to the
+allowed source scope, not to the entire repository.
+
+For explicit local batches, use `python main.py --context repo --paths main.py
+review_graph.py`. Paths must match current Git changes exactly. The output labels
+the selection; context still includes the allowed source snapshot. This is not a
+persistent resume cache. `--paths` cannot be used with PRs. For PR verification
+without writing a comment, use `python main.py --github-pr 7 --context repo
+--no-publish`; revision checks still run before and after review.
+
+Local snapshots capture tracked and unignored untracked source, use HEAD as
+base, reject symlinks/reparse points, and check source fingerprints before and
+after review. A final diff comparison rejects changed input. PR tools use GitHub
+tree/blob APIs at exact head/base SHAs and validate blob hashes; the checkout's
+merge commit is never used as context. Fork head objects unavailable through the
+target repository API fail explicitly. Source snapshots support UTF-8 only and
+have limits of 500 files, 128,000 bytes per file and 2,000,000 bytes per version.
+
+Repository mode defaults to these independent batch budgets:
+
+| Budget | Default | CLI override |
+| --- | ---: | --- |
+| Model requests, including final answers and format repair | 64 | `--max-model-calls` |
+| Tool executions | 160 | `--max-tool-calls` |
+| Returned tool context characters | 256,000 | `--max-context-chars` |
+| Cumulative serialized input characters, including instructions, tools and replayed history | 2,000,000 | `--max-input-chars` |
+
+The file limit remains 30. Each file permits 6 model turns, 8 tool executions and
+48,000 context characters. The CLI explains when the configured call budget cannot
+cover six rounds for every candidate (other limits may bind earlier).
+Reads return at most 120 lines per page, even for larger
+requested ranges. Results page at 12,000
+characters, shrinking further to fit the remaining file/batch context budget;
+searches also page at 20 matches and accept an optional exact `path`
+filter and `offset`. Check `has_more` and use `next_start_line` / `next_offset` to
+continue. Pages contain only complete lines and evidence describes only returned
+ranges. Partial search results are not exhaustive. A single oversized line/match
+or an exhausted cumulative context budget still fails explicitly. Reads clamp at
+EOF and report the actual line count.
+
+The last available model turn is reserved for a final answer. Tools are removed
+from that request, also when at most one tool call remains; `--trace` shows
+`finalize_request`. Each request explains its remaining budgets and recommends
+short, targeted reads. Final responses must explicitly report `context_complete`;
+missing essential context stays incomplete, even with an empty issue list.
+Earlier tool failures also remain failures. Raising the model request budget does
+not raise the other limits or guarantee that every file will finish.
+
+Model requests use JSON mode, low reasoning effort and an 8,192 output-token cap
+(reasoning and visible output share that cap). Final-message text is parsed
+separately from commentary; a whole JSON code fence is tolerated. One invalid or
+output-truncated answer may receive one tools-disabled repair request, within the
+same file/batch/time budgets. Repeated invalid answers, filtered responses and
+fabricated evidence remain failures. SDK network retries are disabled.
+
+Requests have a 45-second SDK timeout. Each file also has a 180-second elapsed-time
+budget checked between operations; in-flight
+network calls may finish after that deadline. Any tool error makes that file
+incomplete even if the model later returns no issues. Other files can still
+succeed. Evidence verification proves the cited range was supplied, not that the
+model's reasoning is correct. Trace `attempted` counts files; `model_calls` and
+`tool_calls` count the V4.2 subgraph requests separately. Trace shows input/context
+character counters and their limits, and emits `repair_request` for format repair.
+A budget rejection before the first model request is skipped; rejection after a
+file has started is failed. Input-budget errors report used, next-request and
+limit values, separately from model-call exhaustion.
 
 Comments start with the hidden marker `<!-- code-review-agent -->` on its own
 line. Subsequent runs update only a comment with that first line and the expected
@@ -102,7 +200,7 @@ these constraints do not guarantee that all model findings are correct.
 | Workflow | Trigger | Behavior |
 | --- | --- | --- |
 | `Python Tests` (`tests.yml`) | Push and PR events | Runs mocked tests without model credentials |
-| `PR Review` (`review.yml`) | PR opened, synchronized, reopened, or marked ready for review | Calls the model and creates or updates the summary |
+| `PR Review` (`review.yml`) | PR opened, synchronized, reopened, or marked ready for review | Uses repository context and creates or updates the summary |
 
 Enable live reviews:
 
@@ -127,7 +225,8 @@ assumes collaborators who can push branches are trusted. The event is
 
 - A complete review exits with code `0`, even when it finds issues. Findings are
   advisory; this version does not block based on severity.
-- A failed or skipped file makes coverage **INCOMPLETE** and exits with code `1`.
+- An eligible failed or skipped file makes coverage **INCOMPLETE** and exits with code `1`.
+  Scope exclusions are separate; no eligible files returns **NO_ELIGIBLE_FILES** with code `0`.
   Successful findings and failure/skip reasons are still published when possible.
 - GitHub retrieval or publication failures also exit with code `1`.
 - Closed/draft PRs and superseded runs are explicitly skipped with code `0` and
@@ -152,8 +251,17 @@ The CLI also:
 Actions invokes:
 
 ```bash
-python main.py --github-pr "$PR_NUMBER" --expected-head-sha "$EXPECTED_HEAD_SHA"
+python main.py --github-pr "$PR_NUMBER" --expected-head-sha "$EXPECTED_HEAD_SHA" \
+  --context repo --trace \
+  --max-model-calls 64 --max-tool-calls 160 \
+  --max-context-chars 256000 --max-input-chars 2000000
 ```
+
+These are batch limits, not a promise to finish every PR size. On 2026-10-20, a
+preselected three-file local batch completed within these defaults (15 model
+requests, 22 tool calls). Larger-batch failures remain documented. The workflow
+configuration has passed static validation; an actual run after pushing this
+version is still required to validate hosted execution and comment publication.
 
 Manual reviews also check revisions, starting from the current head rather than
 an event's expected head. Base-only updates and retargeting are not automatic
@@ -181,7 +289,12 @@ diff_parser.py                              |
               shared budgets / validation
                         |
          review_graph.py (default CLI) or classic loop
-          check -> review / skip -> check -> summarize
+          check -> review / skip / exclude -> check -> summarize
+                        |
+           optional context_review.py subgraph
+              model -> review_tools.py -> model
+                        |
+             repository_context.py snapshots
                         |
                     reviewer.py
                    model request
@@ -190,7 +303,7 @@ diff_parser.py                              |
                 Pydantic validation
                         |
                     ReviewBatch
-          findings + coverage + failures/skips
+          findings + coverage + failures/skips/exclusions
                         |
              +----------+----------------+
              |                           |
@@ -207,6 +320,14 @@ empty issue list is not mistaken for a complete review when files failed or were
 skipped. `PullRequestRevision` identifies the head/base pair being reviewed.
 
 ## Validation
+
+Latest validation (2026-10-20): the files eligible for commit were copied to an
+isolated directory without `experiments/`, `docs/` or `.env`. All 172 agent tests
+ran: 171 passed and one Windows symlink-permission test was skipped. Two tests
+of local experimental scripts remain outside the CI suite. Both workflows
+passed actionlint. The live
+three-file batch completed; hosted Actions execution and comment publication
+for this version remain pending.
 
 ```bash
 python -m unittest discover -s tests -v
@@ -234,10 +355,11 @@ behavior. The live checks above are the deployment acceptance step.
 
 ## Limitations and roadmap
 
-- Reviews diffs rather than full repository context; findings can be incorrect
+- Local CLI is diff-only by default; Actions enables bounded repository context.
+  Findings in either mode can be incorrect.
 - Publishes a conversation summary, not inline review comments
-- Makes at most 30 model calls, with 20,000 characters per diff and 160,000
-  characters total; skipped files remain visible in coverage
+- Diff-only permits 30 model calls; repository mode defaults to 64 requests across
+  at most 30 files. Both keep 20,000 characters per diff and 160,000 diff characters total
 - Cannot review binary, empty, or otherwise unavailable patches as text
 - Rejects PRs beyond GitHub's 3,000-file listing limit
 - Does not automatically review fork, Dependabot, or draft PRs
@@ -253,7 +375,20 @@ Roadmap:
 - V3: Automatic PR summary comments with coverage and revision checks
 - V4.1 (implemented): LangGraph state, conditional routing, bounded iteration,
   progress tracing, and a classic baseline
-- V4.2 (planned): Controlled tool calling and revision-bound repository context
+- V4.2 (implemented): Controlled read/search tools, revision-bound source snapshots,
+  evidence validation and bounded model/tool subgraph; development cases kept locally
 - V4.3 (planned): Retrieval experiments, review-quality evaluation, and execution records
 - V4.4 (planned): Minimal API service, persisted task records, and Docker delivery
 - V5 (planned): Durable queues, independent workers, recovery, and deployment scaling
+
+## Files to commit
+
+Keep application code, agent tests, workflows, `requirements.txt`, `.env.example`
+and this README. Agent tests verify behavior and failure handling without
+depending on local experiments.
+
+The entire `experiments/` directory, virtual environments, Python/test caches,
+coverage output, real `.env` files and local `docs/` notes are ignored. Experiments
+record development progress and diagnostics; they are not a formal benchmark.
+Systematic quality evaluation with a separate validation set remains planned
+for V4.3. Existing tracked files are not untracked by adding an ignore rule.

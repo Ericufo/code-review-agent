@@ -206,7 +206,7 @@ class TestReviewFiles(unittest.TestCase):
             batch.reviewed_files + len(batch.failures) + len(batch.skipped),
             batch.total_files,
         )
-        self.assertIn("maximum 2 LLM calls", batch.skipped[-1].reason)
+        self.assertIn("maximum 2 file attempts", batch.skipped[-1].reason)
 
 
 

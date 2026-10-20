@@ -4,11 +4,14 @@ import json
 from openai import OpenAI
 
 from pydantic import ValidationError
-from review_models import ReviewResult
+from review_models import ReviewResult, ContextReviewResult
 
 
-def get_review_schema() -> str:
-    schema = ReviewResult.model_json_schema()
+def get_review_schema(*, include_evidence: bool = False, require_context_status: bool = False) -> str:
+    schema = (ContextReviewResult if require_context_status else ReviewResult).model_json_schema()
+    if not include_evidence and not require_context_status:
+        schema['$defs']['ReviewIssue']['properties'].pop('evidence', None)
+        schema['$defs'].pop('ContextEvidence', None)
 
     return json.dumps(
         schema,
@@ -16,8 +19,8 @@ def get_review_schema() -> str:
         ensure_ascii=False,
     )
 
-def build_review_instructions() -> str:
-    schema = get_review_schema()
+def build_review_instructions(*, include_evidence: bool = False, require_context_status: bool = False) -> str:
+    schema = get_review_schema(include_evidence=include_evidence, require_context_status=require_context_status)
 
     return f"""
         You are a code reviewer reviewing a Git diff.

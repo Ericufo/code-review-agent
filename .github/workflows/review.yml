@@ -58,4 +58,9 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PYTHONUNBUFFERED: "1"
-        run: python main.py --github-pr "$PR_NUMBER" --expected-head-sha "$EXPECTED_HEAD_SHA"
+        run: >-
+          python main.py --github-pr "$PR_NUMBER"
+          --expected-head-sha "$EXPECTED_HEAD_SHA"
+          --context repo --trace
+          --max-model-calls 64 --max-tool-calls 160
+          --max-context-chars 256000 --max-input-chars 2000000
