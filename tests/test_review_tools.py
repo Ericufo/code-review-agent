@@ -44,7 +44,6 @@ class TestReviewTools(unittest.TestCase):
              ('read_file', '{"path":"dep.py","start_line":true,"end_line":2}'),
              ('read_file', '{"path":"dep.py","start_line":2,"end_line":1}'),
              ('read_file', '{"path":"dep.py","start_line":1,"end_line":2,"extra":1}'),
-             ('search_code', '{"query":"lookup","context_lines":21}'),
              ('search_code', '{"query":"lookup","context_lines":-1}'),
              ('search_code', '{"query":"lookup","context_lines":true}'),
              ('search_code', '{"query":""}'), ('search_code', '{"query":"x","version":"other"}')]:
@@ -81,6 +80,25 @@ class TestReviewTools(unittest.TestCase):
         self.assertEqual((match['evidence']['start_line'], match['evidence']['end_line']), (2, 2))
         self.assertEqual(session.evidence[0].start_line, 2)
         self.assertEqual(session.evidence[0].end_line, 2)
+
+    def test_oversized_search_context_is_clamped_and_evidence_stays_bounded(self):
+        ctx = context()
+        ctx.files['head']['long.py'] = '\n'.join(
+            'needle' if i == 50 else f'line {i}' for i in range(1, 101))
+        for requested in (21, 1000000):
+            with self.subTest(requested=requested):
+                session = ToolSession(ctx, ContextBudget())
+                payload = session.execute('search_code', json.dumps({
+                    'query': 'needle', 'path': 'long.py', 'context_lines': requested}))
+                page = json.loads(payload)
+                match = page['entries'][0]
+                self.assertTrue(match['context_truncated'])
+                self.assertEqual(match['match_line'], 50)
+                self.assertEqual((match['evidence']['start_line'], match['evidence']['end_line']), (30, 70))
+                self.assertEqual(len(match['text'].splitlines()), 41)
+                self.assertLessEqual(len(payload), 12000)
+                self.assertFalse(page['has_more'])
+                self.assertEqual(session.used_chars, len(payload))
 
     def test_search_neighbor_pagination_counts_matches_even_with_overlapping_ranges(self):
         ctx = context()

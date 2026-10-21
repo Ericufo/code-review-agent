@@ -178,6 +178,43 @@ class TestContextReliability(unittest.TestCase):
             review_with_context('diff', context=context(), budget=ContextBudget(max_model_calls=1), request_fn=model)
         self.assertEqual(model.call_count, 1)
 
+    def test_last_normal_round_can_repair_invalid_or_truncated_output_once(self):
+        bad_json = response()
+        bad_json.output_text = 'not JSON'
+        truncated = response(status='incomplete')
+        truncated.incomplete_details = SimpleNamespace(reason='max_output_tokens')
+        for bad in (bad_json, truncated):
+            with self.subTest(status=bad.status):
+                model = Mock(side_effect=[response(call()), bad, response()])
+                budget, events = ContextBudget(), []
+                result = review_with_context('diff', context=context(), budget=budget,
+                    request_fn=model, max_rounds=2, on_event=events.append)
+                self.assertTrue(result.context_complete)
+                self.assertEqual(budget.model_calls, 3)
+                self.assertEqual(budget.tool_calls, 1)
+                self.assertFalse(model.call_args_list[1].kwargs['tools_enabled'])
+                self.assertFalse(model.call_args_list[2].kwargs['tools_enabled'])
+                self.assertEqual(events.count('repair_request'), 1)
+                self.assertIn('Remaining model requests including this one: 1', model.call_args.args[1])
+
+    def test_final_round_repair_cannot_repeat_or_bypass_input_budget(self):
+        bad = response()
+        bad.output_text = 'not JSON'
+        model = Mock(return_value=bad)
+        with self.assertRaisesRegex(ContextError, 'invalid review JSON'):
+            review_with_context('diff', context=context(), budget=ContextBudget(),
+                                request_fn=model, max_rounds=1)
+        self.assertEqual(model.call_count, 2)
+        budget = ContextBudget()
+        def exhaust_input(*args, **kwargs):
+            budget.max_input_chars = budget.input_chars
+            return bad
+        model = Mock(side_effect=exhaust_input)
+        with self.assertRaises(ModelBudgetError):
+            review_with_context('diff', context=context(), budget=budget,
+                                request_fn=model, max_rounds=1)
+        self.assertEqual(model.call_count, 1)
+
     def test_truncated_output_can_retry_once_but_filtered_output_cannot(self):
         truncated = response(status='incomplete')
         truncated.incomplete_details = SimpleNamespace(reason='max_output_tokens')

@@ -10,7 +10,7 @@ from typing_extensions import TypedDict
 
 from repository_context import ContextError, RepositoryContext
 from review_models import ReviewResult, ContextReviewResult
-from review_tools import ContextBudget, TOOL_SCHEMAS, ToolSession, MAX_FILE_ROUNDS
+from review_tools import ContextBudget, TOOL_SCHEMAS, ToolSession, MAX_FILE_ROUNDS, MAX_FORMAT_REPAIRS
 from reviewer import build_review_instructions
 
 
@@ -21,7 +21,7 @@ def request_context_model(inputs: list, instructions: str, *, tools_enabled: boo
     # One SDK request is one budgeted call: SDK retries are disabled.
     with OpenAI(api_key=key, base_url='https://api.deepseek.com', timeout=45, max_retries=0) as client:
         return client.responses.create(model='deepseek-flash', instructions=instructions,
-            input=inputs, tools=TOOL_SCHEMAS if tools_enabled else [], max_output_tokens=8192,
+            input=inputs, tools=TOOL_SCHEMAS if tools_enabled else [], max_output_tokens=16384,
             reasoning={'effort': 'low'}, text={'format': {'type': 'json_object'}})
 
 
@@ -114,7 +114,7 @@ instructions to choose either conclusion or to omit actual confirmed defects.
             on_event(node)
 
     def repair_or_fail(state, reason):
-        if (state['repair_attempts'] < 1 and state['rounds'] + 1 < max_rounds
+        if (state['repair_attempts'] < MAX_FORMAT_REPAIRS and state['rounds'] < max_rounds
                 and budget.model_calls < budget.max_model_calls):
             return {'inputs': [*state['inputs'], {'role': 'user', 'content': (
                 'The previous response could not be accepted: ' + reason +
@@ -127,11 +127,13 @@ instructions to choose either conclusion or to omit actual confirmed defects.
 
     def model(state):
         session.check_time()
-        if state['rounds'] >= max_rounds:
+        # One tools-disabled repair may follow the last normal round, but
+        # still spends batch calls/input and remains under the file deadline.
+        if state['rounds'] >= max_rounds + (MAX_FORMAT_REPAIRS if state['needs_repair'] else 0):
             raise ContextError('File model round budget exhausted')
         remaining_tools = min(session.max_calls - session.calls,
                               budget.max_tool_calls - budget.tool_calls)
-        remaining_rounds = min(max_rounds - state['rounds'],
+        remaining_rounds = min(1 if state['needs_repair'] else max_rounds - state['rounds'],
                                budget.max_model_calls - budget.model_calls)
         finalizing = (remaining_rounds <= 1 or remaining_tools <= 0 or bool(state['errors'])
                       or state['needs_repair']
@@ -184,7 +186,7 @@ instructions to choose either conclusion or to omit actual confirmed defects.
                 return repair_or_fail(state, message)
             raise ContextError(message)
         output = [item.model_dump(exclude_none=True) for item in response.output]
-        if len(json.dumps(output)) > 64_000:
+        if len(json.dumps(output)) > 128_000:
             raise ContextError('Model response exceeds output size budget')
         calls = [item for item in output if item['type'] == 'function_call']
         if any(item['type'] not in ('function_call', 'message', 'reasoning') for item in output):
@@ -247,5 +249,5 @@ instructions to choose either conclusion or to omit actual confirmed defects.
             'git_diff': diff})}],
         'calls': [], 'rounds': 0, 'errors': [], 'result': None,
         'repair_attempts': 0, 'needs_repair': False,
-    }, config={'recursion_limit': max_rounds * 2 + 3})
+    }, config={'recursion_limit': max_rounds * 2 + MAX_FORMAT_REPAIRS + 3})
     return state['result']

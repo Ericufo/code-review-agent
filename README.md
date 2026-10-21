@@ -138,15 +138,17 @@ Repository mode defaults to these independent batch budgets:
 | Returned tool context characters | 256,000 | `--max-context-chars` |
 | Cumulative serialized input characters, including instructions, tools and replayed history | 2,000,000 | `--max-input-chars` |
 
-The file limit remains 30. Each file permits 6 model turns, 12 tool executions and
-48,000 context characters. The CLI explains when the configured call budget cannot
-cover six rounds for every candidate (other limits may bind earlier).
+The file limit remains 30. Each file permits 6 normal model turns, at most one
+additional tools-disabled format repair, 24 tool executions and 96,000 context
+characters. The CLI explains when the configured call budget cannot cover seven
+requests for every candidate (other limits may bind earlier).
 Reads return at most 120 lines per page, even for larger
 requested ranges. Results page at 12,000
 characters, shrinking further to fit the remaining file/batch context budget;
 searches also page at 20 matches and accept an optional exact `path`
-filter and `offset`. Optional `context_lines` (0–20, default 0) includes nearby
-lines so a definition and its signature can be inspected in one call. Search
+filter and `offset`. Optional `context_lines` (a nonnegative integer, default 0)
+includes nearby lines so a definition and its signature can be inspected in one
+call. Requests above 20 are clamped to 20 lines on each side. Search
 entries identify `match_line`; `context_truncated` means optional neighbors were
 reduced to fit the budget. Evidence covers only the lines actually returned.
 Offsets count matches, even when context ranges overlap.
@@ -164,11 +166,12 @@ missing essential context stays incomplete, even with an empty issue list.
 Earlier tool failures also remain failures. Raising the model request budget does
 not raise the other limits or guarantee that every file will finish.
 
-Model requests use JSON mode, low reasoning effort and an 8,192 output-token cap
+Model requests use JSON mode, low reasoning effort and a 16,384 output-token cap
 (reasoning and visible output share that cap). Final-message text is parsed
 separately from commentary; a whole JSON code fence is tolerated. One invalid or
-output-truncated answer may receive one tools-disabled repair request, within the
-same file/batch/time budgets. Repeated invalid answers, filtered responses and
+output-truncated answer may receive one tools-disabled repair request, including
+after the last normal round. This still charges the batch call/input budgets and
+must fit the file deadline; it does not reopen tools. Repeated invalid answers, filtered responses and
 fabricated evidence remain failures. SDK network retries are disabled.
 
 Requests have a 45-second SDK timeout. Each file also has a 180-second elapsed-time
@@ -258,11 +261,16 @@ Actions invokes:
 ```bash
 python main.py --github-pr "$PR_NUMBER" --expected-head-sha "$EXPECTED_HEAD_SHA" \
   --context repo --trace \
-  --max-model-calls 128 --max-tool-calls 256 \
-  --max-context-chars 800000 --max-input-chars 6000000
+  --max-model-calls 384 --max-tool-calls 1024 \
+  --max-context-chars 4000000 --max-input-chars 24000000
 ```
 
 Actions uses these explicit larger limits; the CLI defaults above remain unchanged.
+On 2026-10-21, these batch limits were doubled again to leave extra headroom for
+the V4.2 closeout. Per-file limits remain 24 tools and 96,000 context characters;
+the expanded-budget live run did not exhaust those limits. Higher limits allow
+more spending if needed; they do not guarantee completion or resolve connection,
+output-format, or unavailable-source failures.
 These are batch limits, not a promise to finish every PR size. On 2026-10-20,
 [PR #4's first hosted run](https://github.com/Ericufo/code-review-agent/actions/runs/39398900386)
 updated its summary comment but exited with `INCOMPLETE`: 6/21 eligible files
@@ -276,6 +284,14 @@ answer turn. A subsequent full-PR, no-publish run with the first repair complete
 failures all concerned the former eight-tool per-file limit or missing context.
 The second repair adds bounded search context and raises that per-file limit to
 12. A new hosted run is still needed to validate the updated configuration.
+
+[The next hosted run](https://github.com/Ericufo/code-review-agent/actions/runs/39433088720)
+completed 13/21 files with eight failures and no skips. Its batch budgets were
+not exhausted: three files failed because requested search context exceeded 20,
+three exhausted the per-file 48,000-character context limit, and two exhausted
+12 tool calls. The latest adjustment clamps oversized search-context requests
+instead of rejecting them, doubles per-file context/tool limits, and increases
+the explicit Actions budgets shown above. Failure reporting remains unchanged.
 
 Manual reviews also check revisions, starting from the current head rather than
 an event's expected head. Base-only updates and retargeting are not automatic
@@ -336,23 +352,26 @@ skipped. `PullRequestRevision` identifies the head/base pair being reviewed.
 ## Validation
 
 Validation on 2026-10-20: the initial Python Tests workflow passed in Ubuntu Actions.
-After the Actions failure investigation, 176 tests ran locally: 175 passed and
+After the Actions failure investigation, 179 tests ran locally: 178 passed and
 one Windows symlink-permission test was skipped. New regressions cover the last
 available tool call, search context and evidence bounds, budget shrinking and
-pagination with overlapping context. The final model turn remains reserved.
+pagination with overlapping context, oversized search requests, and final-round
+format repair without bypassing batch limits. The final normal model turn remains reserved.
 Both workflows passed actionlint, and the updated review command was parsed
 with the actual CLI. Two tests of local
 experimental scripts remain outside the CI suite. Hosted comment publication
 worked for the initial run, but full-PR completion and hosted validation of the
 repair remain separate acceptance checks.
 
-The second repair has not passed live acceptance. Its six-file diagnostic ended
-with six failures; the local diagnostic writer then failed to serialize the
-Pydantic result, so individual failure reasons were not saved. After fixing the
-writer, a one-file probe failed on its first request with `APIConnectionError`;
-a separate model-service connectivity check returned an SSL error. These records
-do not establish the second repair's live coverage. They are retained locally
-alongside the earlier full-PR result rather than reported as successful reviews.
+The expanded-budget full-PR run completed 17/21 files with no skips, using 113
+model requests, 196 tool calls and 5,491,910 input characters. Four files failed:
+two invalid final JSON answers, one output-token truncation and one disallowed
+source request. The output cap was then doubled and a bounded format repair was
+enabled after the last normal turn. A targeted three-file verification of those
+output failures was blocked by two model connection errors and one GitHub API
+error. It completed 0/3 and does not establish the final repair's live coverage.
+These separate runs cannot be combined into a full-PR pass. Original logs and
+diagnostics remain local in `experiments/`; hosted acceptance is still pending.
 
 ```bash
 python -m unittest discover -s tests -v

@@ -113,7 +113,7 @@ class TestContextReview(unittest.TestCase):
         payload = client.return_value.__enter__.return_value.responses.create.call_args.kwargs
         self.assertEqual(payload['text'], {'format': {'type': 'json_object'}})
         self.assertEqual(payload['reasoning'], {'effort': 'low'})
-        self.assertEqual(payload['max_output_tokens'], 8192)
+        self.assertEqual(payload['max_output_tokens'], 16384)
 
     def test_final_request_actually_removes_tools_from_api_payload(self):
         from context_review import request_context_model

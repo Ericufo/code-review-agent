@@ -31,7 +31,7 @@ class SearchCodeArgs(BaseModel):
     version: Literal['head', 'base'] = 'head'
     path: str | None = None
     offset: int = Field(default=0, ge=0)
-    context_lines: int = Field(default=0, ge=0, le=20)
+    context_lines: int = Field(default=0, ge=0)
 
     @model_validator(mode='after')
     def valid_query(self):
@@ -48,7 +48,7 @@ TOOL_SCHEMAS = [
      'description': description}
     for name, model, description in (
         ('read_file', ReadFileArgs, 'Read source lines at head or base. Each page contains at most 120 lines and 12000 characters, even if a larger range is requested. Check has_more and pass next_start_line to continue; end_line clamps at EOF. Cite only returned lines.'),
-        ('search_code', SearchCodeArgs, 'Literal case-sensitive source search at head or base. Optional path restricts to one file; context_lines adds up to 20 surrounding lines on each side to inspect definitions/signatures in one call. Context may shrink to fit the page; check context_truncated and the actual evidence range. Results page at 20 matches or 12000 characters; pass next_offset as offset to continue (offset counts matches, not source lines). has_more means results are NOT exhaustive. No regex or shell.'),
+        ('search_code', SearchCodeArgs, 'Literal case-sensitive source search at head or base. Optional path restricts to one file; context_lines requests surrounding lines on each side to inspect definitions/signatures in one call. Requests above 20 are clamped to 20. Context may shrink further to fit the page; check context_truncated and the actual evidence range. Results page at 20 matches or 12000 characters; pass next_offset as offset to continue (offset counts matches, not source lines). has_more means results are NOT exhaustive. No regex or shell.'),
     )
 ]
 
@@ -58,7 +58,10 @@ class ModelBudgetError(ContextError):
 
 
 MAX_FILE_ROUNDS = 6
-MAX_FILE_TOOL_CALLS = 12
+MAX_FORMAT_REPAIRS = 1
+MAX_FILE_TOOL_CALLS = 24
+MAX_FILE_CONTEXT_CHARS = 96_000
+MAX_SEARCH_CONTEXT_LINES = 20
 MAX_TOOL_RESULT_CHARS = 12_000
 
 
@@ -86,7 +89,7 @@ class ContextBudget:
 
 class ToolSession:
     def __init__(self, context: RepositoryContext, budget: ContextBudget, *,
-                 max_calls=MAX_FILE_TOOL_CALLS, max_chars=48_000, timeout=180, clock=time.monotonic):
+                 max_calls=MAX_FILE_TOOL_CALLS, max_chars=MAX_FILE_CONTEXT_CHARS, timeout=180, clock=time.monotonic):
         self.context, self.budget = context, budget
         self.max_calls, self.max_chars = max_calls, max_chars
         self.calls = self.used_chars = 0
@@ -185,7 +188,7 @@ class ToolSession:
                         matched += 1
                         if matched <= args.offset:
                             continue
-                        radius = args.context_lines
+                        radius = min(args.context_lines, MAX_SEARCH_CONTEXT_LINES)
                         def match_entry():
                             start, end = max(1, number - radius), min(len(lines), number + radius)
                             return {**entry(path, start, end, lines[start - 1:end]),

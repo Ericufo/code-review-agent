@@ -20,7 +20,7 @@ from github_review import (
 )
 from review_formatter import format_review_batch
 from repository_context import capture_local_context, GitHubRepositoryContext, allowed_path
-from review_tools import ContextBudget, MAX_FILE_ROUNDS
+from review_tools import ContextBudget, MAX_FILE_ROUNDS, MAX_FORMAT_REPAIRS
 
 
 CONTEXT_BUDGET_OPTIONS = ('max_model_calls', 'max_input_chars', 'max_context_chars', 'max_tool_calls')
@@ -235,9 +235,10 @@ def main() -> int:
     print(f"Detected {len(file_diffs)} changed file(s); candidates: {candidate_count}; excluded: {excluded_count}.")
     if args.paths is not None:
         print(f"Selection covers {len(file_diffs)}/{len(all_local_files)} detected local changes; other changes are not reviewed.")
-    if context is not None and candidate_count * MAX_FILE_ROUNDS > limits.max_model_calls:
-        print(f"Budget note: {candidate_count} candidates can require up to {candidate_count * MAX_FILE_ROUNDS} model requests "
-              f"at {MAX_FILE_ROUNDS} rounds per file; configured limit is {limits.max_model_calls}. "
+    max_file_requests = MAX_FILE_ROUNDS + MAX_FORMAT_REPAIRS
+    if context is not None and candidate_count * max_file_requests > limits.max_model_calls:
+        print(f"Budget note: {candidate_count} candidates can require up to {candidate_count * max_file_requests} model requests "
+              f"at {MAX_FILE_ROUNDS} normal rounds plus {MAX_FORMAT_REPAIRS} format repair per file; configured limit is {limits.max_model_calls}. "
               "Use smaller local --paths batches or explicit budget overrides; other limits still apply.")
     if client is not None:
         print(f"Reviewed commit: {revision.head_sha}")
