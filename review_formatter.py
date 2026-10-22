@@ -11,7 +11,7 @@ def format_review_batch(batch: ReviewBatch) -> str:
 
     lines.append("### Summary")
     lines.append("")
-    status = "INCOMPLETE" if batch.incomplete else "COMPLETE"
+    status = batch.status
     lines.append(f"Status: **{status}**")
     lines.append("")
     lines.append(batch.coverage_summary)
@@ -21,6 +21,7 @@ def format_review_batch(batch: ReviewBatch) -> str:
     lines.append(build_review_summary(
         result.issues, total_files=batch.total_files, reviewed_files=batch.reviewed_files,
         incomplete=batch.incomplete,
+        excluded_files=len(batch.excluded),
     ))
     lines.append("")
 
@@ -53,7 +54,16 @@ def format_review_batch(batch: ReviewBatch) -> str:
             )
             lines.append("")
 
-    for title, problems in (("Failed files", batch.failures), ("Skipped files", batch.skipped)):
+        for evidence in issue.evidence:
+            lines.append(
+                f"Evidence: `{evidence.repository}@{evidence.revision}` "
+                f"`{evidence.path}:{evidence.start_line}-{evidence.end_line}`"
+            )
+        if issue.evidence:
+            lines.append("")
+
+    for title, problems in (("Failed files", batch.failures), ("Skipped files", batch.skipped),
+                            ("Excluded files (outside review scope)", batch.excluded)):
         if problems:
             lines.extend([f"### {title}", ""])
             for problem in problems:

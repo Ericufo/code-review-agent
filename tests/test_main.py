@@ -86,6 +86,23 @@ class TestMain(unittest.TestCase):
         self.assertNotIn("First finding", updated["body"])
         self.assertNotIn("### Findings", updated["body"])
 
+    def test_pr_no_publish_rechecks_revision_without_comment_calls(self):
+        code, stdout, stderr = self.run_cli('--github-pr', '7', '--no-publish')
+        self.assertEqual(code, 0)
+        self.assertIn('no comment published', stdout)
+        self.assertEqual(self.client.get_pull_request.call_count, 3)
+        self.client.get_issue_comments.assert_not_called()
+        self.client.create_issue_comment.assert_not_called()
+        self.client.update_issue_comment.assert_not_called()
+
+    def test_pr_no_publish_discards_superseded_result(self):
+        self.client.get_pull_request.side_effect = [self.metadata, self.metadata,
+            {**self.metadata, 'head': {'sha': 'c' * 40}}]
+        code, stdout, stderr = self.run_cli('--github-pr', '7', '--no-publish')
+        self.assertEqual(code, 1)
+        self.assertNotIn('=== Review Result ===', stdout)
+        self.client.create_issue_comment.assert_not_called()
+
     def test_comment_failures_return_nonzero_without_success_message(self):
         for operation in (
             "get_issue_comments", "get_comment_author_login", "create_issue_comment", "update_issue_comment"
@@ -265,6 +282,17 @@ class TestMain(unittest.TestCase):
         self.assertIn("Reviewed 0/0 file(s)", body)
         self.assertNotIn("Old findings", body)
 
+    def test_empty_pr_with_context_budget_still_publishes_empty_summary(self):
+        self.client.get_pull_request_files.return_value = []
+        exit_code, stdout, stderr = self.run_cli(
+            '--github-pr', '7', '--context', 'repo', '--max-model-calls', '64',
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr, '')
+        self.assertIn('No changed files to review', stdout)
+        self.review.assert_not_called()
+        self.client.create_issue_comment.assert_called_once()
+
     def test_empty_local_diff_does_not_review_or_publish(self):
         with patch("main.get_local_files", return_value=[]):
             exit_code, stdout, stderr = self.run_cli()
@@ -347,6 +375,31 @@ class TestMain(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             self.run_cli("--expected-head-sha", "a" * 40)
         self.assertEqual(caught.exception.code, 2)
+        self.client_factory.assert_not_called()
+
+    def test_default_engine_and_trace_are_used_by_pr_review(self):
+        exit_code, stdout, stderr = self.run_cli("--github-pr", "7", "--trace")
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Review engine: langgraph", stdout)
+        self.assertIn("[GRAPH] review_file", stderr)
+        self.assertIn("[GRAPH] summarize", stderr)
+        self.assertIn("attempted=1 reviewed=1 failed=0 skipped=0", stderr)
+        body = self.client.create_issue_comment.call_args.kwargs["body"]
+        self.assertNotIn("[GRAPH]", body)
+
+    def test_classic_engine_is_available_as_baseline(self):
+        with patch("review_graph.build_review_graph", side_effect=AssertionError("must not build")):
+            exit_code, stdout, stderr = self.run_cli("--github-pr", "7", "--engine", "classic")
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Review engine: classic", stdout)
+        self.assertEqual(stderr, "")
+        self.review.assert_called_once()
+
+    def test_trace_with_classic_engine_is_rejected_before_any_work(self):
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli("--engine", "classic", "--trace")
+        self.assertEqual(caught.exception.code, 2)
+        self.review.assert_not_called()
         self.client_factory.assert_not_called()
 
 
