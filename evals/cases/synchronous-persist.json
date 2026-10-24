@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "synchronous-persist",
+  "scenario_id": "async-return-contract",
+  "split": "dev",
+  "label": "clean",
+  "provenance": "Self-contained synthetic fixture authored for V4.3. Development scenario; not eligible for an unseen holdout.",
+  "changed_files": [
+    "service.py"
+  ],
+  "fixture": {
+    "base": {
+      "service.py": "from storage import persist\n\nasync def save():\n    result = persist()\n    return result\n",
+      "storage.py": "SAVED = []\n\ndef persist():\n    SAVED.append('row')\n    return True\n"
+    },
+    "head": {
+      "service.py": "from storage import persist\n\nasync def save():\n    return persist()\n",
+      "storage.py": "SAVED = []\n\ndef persist():\n    SAVED.append('row')\n    return True\n"
+    }
+  },
+  "expectation": {
+    "defects": [],
+    "rationale": "The declaration in storage.py establishes the call contract. persist is synchronous and performs its write before returning True. Inlining the result variable preserves execution; adding await would be incorrect.",
+    "evidence": [
+      {
+        "version": "head",
+        "path": "storage.py",
+        "start_line": 1,
+        "end_line": 5,
+        "quote": "SAVED = []\n\ndef persist():\n    SAVED.append('row')\n    return True\n"
+      },
+      {
+        "version": "base",
+        "path": "service.py",
+        "start_line": 1,
+        "end_line": 5,
+        "quote": "from storage import persist\n\nasync def save():\n    result = persist()\n    return result\n"
+      }
+    ],
+    "false_positive_traps": [
+      "Every function called from async def must itself be awaited."
+    ]
+  }
+}

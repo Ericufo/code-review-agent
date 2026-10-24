@@ -1,12 +1,15 @@
 """Batch workflow with an optional V4.2 bounded model/tool subgraph."""
 
 from collections.abc import Callable
+from dataclasses import replace
+from time import perf_counter
 
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
 from diff_parser import FileDiff
 from review_models import ReviewIssue, ReviewResult
+from review_events import reason_code, record_event
 from review_pipeline import (
     FileProblem,
     ReviewBatch,
@@ -45,6 +48,7 @@ def build_review_graph(
     context_request_fn=None,
     context_budget=None,
     on_step=None,
+    on_record=None,
 ):
     """Compile a graph with an injected model boundary for offline testing."""
 
@@ -109,7 +113,23 @@ def build_review_graph(
         initial_calls = context_budget.model_calls if context is not None else 0
         try:
             if context is None:
-                issues = review_file_issues(file_diff, review_fn)
+                started = perf_counter()
+                reason = None
+                request_rejected = False
+                try:
+                    issues = review_file_issues(file_diff, review_fn)
+                except Exception as exc:
+                    from review_tools import ModelBudgetError
+                    request_rejected = isinstance(exc, ModelBudgetError)
+                    reason = reason_code(f'{type(exc).__name__}: {exc}')
+                    raise
+                finally:
+                    record_event(on_record, node='request_rejected' if request_rejected else 'model_request', path=file_diff.path,
+                        started=started, outcome='error' if reason else 'ok', reason=reason,
+                        counters={'model_calls': state['attempted'] if request_rejected else update['attempted'], 'tool_calls': 0,
+                                  'input_chars': None, 'context_chars': 0},
+                        limits={'max_files': max_files, 'max_file_chars': max_file_chars,
+                                'max_total_chars': max_total_chars})
             else:
                 from context_review import review_with_context
 
@@ -133,10 +153,12 @@ def build_review_graph(
                 issues = review_file_issues(file_diff, lambda diff: review_with_context(
                     diff, context=context, budget=context_budget,
                     request_fn=context_request_fn, on_event=on_event,
+                    on_record=(lambda event: on_record(replace(event, path=file_diff.path)))
+                              if on_record is not None else None,
                 ), verified_context=True)
         except Exception as exc:
             from review_tools import ModelBudgetError
-            if context is not None and isinstance(exc, ModelBudgetError) and context_budget.model_calls == initial_calls:
+            if isinstance(exc, ModelBudgetError) and (context is None or context_budget.model_calls == initial_calls):
                 # Rejected before this file's first request: it was not reviewed.
                 update.update(attempted=state['attempted'], used_chars=state['used_chars'],
                     skipped=[*state['skipped'], FileProblem(file_diff.path, str(exc))])
@@ -157,12 +179,35 @@ def build_review_graph(
             excluded=state.get('excluded', []),
         )}
 
+    def observed(node, function):
+        def run(state):
+            started = perf_counter()
+            update = function(state)
+            merged = {**state, **update}
+            outcome, reason = 'ok', None
+            for field, status in (('failures', 'failed'), ('skipped', 'skipped'), ('excluded', 'excluded')):
+                if len(merged.get(field, [])) > len(state.get(field, [])):
+                    outcome = status
+                    reason = reason_code(merged[field][-1].reason)
+            if node == 'review_file' and outcome == 'ok':
+                reason = 'completed'
+            if node == 'summarize':
+                reason = merged['batch'].status
+            counters = {key: merged[key] for key in ('attempted', 'reviewed', 'used_chars')}
+            counters.update({key: len(merged.get(key, [])) for key in ('failures', 'skipped', 'excluded')})
+            if context is None:
+                counters.update(model_calls=merged['attempted'], tool_calls=0, input_chars=None, context_chars=0)
+            record_event(on_record, node=node, path=merged['active_path'], started=started,
+                         outcome=outcome, reason=reason, budget=context_budget if context is not None else None,
+                         counters=counters, limits={'max_files': max_files, 'max_file_chars': max_file_chars,
+                                                   'max_total_chars': max_total_chars})
+            return update
+        return run
+
     builder = StateGraph(ReviewState)
-    builder.add_node("check_file", check_file)
-    builder.add_node("review_file", review_file)
-    builder.add_node("skip_file", skip_file)
-    builder.add_node("exclude_file", exclude_file)
-    builder.add_node("summarize", summarize)
+    for node, function in (('check_file', check_file), ('review_file', review_file),
+                           ('skip_file', skip_file), ('exclude_file', exclude_file), ('summarize', summarize)):
+        builder.add_node(node, observed(node, function))
     builder.add_edge(START, "check_file")
     builder.add_conditional_edges("check_file", route_file, {
         "review_file": "review_file", "skip_file": "skip_file", "summarize": "summarize", "exclude_file": "exclude_file",
@@ -182,6 +227,7 @@ def review_files_graph(
     max_file_chars: int,
     max_total_chars: int,
     on_step: Callable[[ReviewStep], None] | None = None,
+    on_record=None,
     context=None,
     context_request_fn=None,
     max_model_calls: int | None = None,
@@ -197,7 +243,7 @@ def review_files_graph(
         review_fn=review_fn, max_files=max_files,
         max_file_chars=max_file_chars, max_total_chars=max_total_chars,
         context=context, context_request_fn=context_request_fn,
-        context_budget=context_budget, on_step=on_step,
+        context_budget=context_budget, on_step=on_step, on_record=on_record,
     )
     state: ReviewState = {
         "files": list(file_diffs), "index": 0, "active_path": None, "skip_reason": None,

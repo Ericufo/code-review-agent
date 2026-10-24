@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "uncaught-config-value",
+  "scenario_id": "exception-type-contract",
+  "split": "dev",
+  "label": "defect",
+  "provenance": "Self-contained synthetic fixture authored for V4.3. Development scenario; not eligible for an unseen holdout.",
+  "changed_files": [
+    "service.py"
+  ],
+  "fixture": {
+    "base": {
+      "service.py": "from config import load_name\n\ndef display_name():\n    try:\n        return load_name()\n    except (ValueError, KeyError):\n        return 'guest'\n",
+      "config.py": "def load_name():\n    raise ValueError('invalid stored name')\n"
+    },
+    "head": {
+      "service.py": "from config import load_name\n\ndef display_name():\n    try:\n        return load_name()\n    except KeyError:\n        return 'guest'\n",
+      "config.py": "def load_name():\n    raise ValueError('invalid stored name')\n"
+    }
+  },
+  "expectation": {
+    "defects": [
+      {
+        "defect_id": "uncaught-config-value-regression",
+        "category": "exception-type-contract",
+        "primary_location": {
+          "version": "head",
+          "path": "service.py",
+          "start_line": 6,
+          "end_line": 6,
+          "quote": "    except KeyError:\n"
+        },
+        "evidence": [
+          {
+            "version": "head",
+            "path": "config.py",
+            "start_line": 1,
+            "end_line": 2,
+            "quote": "def load_name():\n    raise ValueError('invalid stored name')\n"
+          }
+        ],
+        "claim": "Narrowing the handler drops the ValueError raised by load_name.",
+        "trigger": "Call display_name with the supplied stored configuration.",
+        "impact": "The fallback 'guest' is replaced by an uncaught ValueError.",
+        "accepted_descriptions": [
+          "Narrowing the handler drops the ValueError raised by load_name.",
+          "The fallback 'guest' is replaced by an uncaught ValueError."
+        ],
+        "rejected_descriptions": [
+          "Narrowing any exception handler necessarily removes a reachable fallback."
+        ]
+      }
+    ],
+    "rationale": "The only supplied implementation of load_name always raises ValueError, which the new handler misses.",
+    "evidence": [
+      {
+        "version": "head",
+        "path": "config.py",
+        "start_line": 1,
+        "end_line": 2,
+        "quote": "def load_name():\n    raise ValueError('invalid stored name')\n"
+      },
+      {
+        "version": "base",
+        "path": "service.py",
+        "start_line": 1,
+        "end_line": 7,
+        "quote": "from config import load_name\n\ndef display_name():\n    try:\n        return load_name()\n    except (ValueError, KeyError):\n        return 'guest'\n"
+      }
+    ],
+    "false_positive_traps": [
+      "Narrowing any exception handler necessarily removes a reachable fallback."
+    ]
+  }
+}

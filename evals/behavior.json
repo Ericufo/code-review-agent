@@ -1,0 +1,275 @@
+{
+  "shared-list-sort": {
+    "probe": "import service, store\nresult = service.ranked_values()\nanswer = [result, store.values()]\n",
+    "base": [
+      [
+        1,
+        2,
+        3
+      ],
+      [
+        3,
+        1,
+        2
+      ]
+    ],
+    "head": [
+      [
+        1,
+        2,
+        3
+      ],
+      [
+        1,
+        2,
+        3
+      ]
+    ]
+  },
+  "guaranteed-profile": {
+    "probe": "import service\nanswer = service.display_name()\n",
+    "base": "Ada",
+    "head": "Ada"
+  },
+  "seconds-rescaled": {
+    "probe": "import service\nanswer = service.delay_seconds()\n",
+    "base": 30,
+    "head": 0.03
+  },
+  "milliseconds-normalized": {
+    "probe": "import service\nanswer = service.delay_seconds()\n",
+    "base": 30.0,
+    "head": 30.0
+  },
+  "consumed-row-stream": {
+    "probe": "import service\nanswer = service.summarize()\n",
+    "base": [
+      3,
+      6
+    ],
+    "head": [
+      3,
+      0
+    ]
+  },
+  "reiterable-row-list": {
+    "probe": "import service\nanswer = service.summarize()\n",
+    "base": [
+      3,
+      6
+    ],
+    "head": [
+      3,
+      6
+    ]
+  },
+  "unawaited-persist": {
+    "probe": "import asyncio, inspect, service, storage\nvalue = asyncio.run(service.save())\nif inspect.iscoroutine(value):\n    value.close()\n    value = 'unawaited-coroutine'\nanswer = [value, storage.SAVED]\n",
+    "base": [
+      true,
+      [
+        "row"
+      ]
+    ],
+    "head": [
+      "unawaited-coroutine",
+      []
+    ]
+  },
+  "synchronous-persist": {
+    "probe": "import asyncio, inspect, service, storage\nvalue = asyncio.run(service.save())\nif inspect.iscoroutine(value):\n    value.close()\n    value = 'unawaited-coroutine'\nanswer = [value, storage.SAVED]\n",
+    "base": [
+      true,
+      [
+        "row"
+      ]
+    ],
+    "head": [
+      true,
+      [
+        "row"
+      ]
+    ]
+  },
+  "persistent-default-bucket": {
+    "probe": "import service\nfirst = list(service.collect('a'))\nsecond = list(service.collect('b'))\nanswer = [first, second, service.collect('c', None), service.collect('d', ['x'])]\n",
+    "base": [
+      [
+        "a"
+      ],
+      [
+        "b"
+      ],
+      [
+        "c"
+      ],
+      [
+        "x",
+        "d"
+      ]
+    ],
+    "head": [
+      [
+        "a"
+      ],
+      [
+        "a",
+        "b"
+      ],
+      [
+        "c"
+      ],
+      [
+        "x",
+        "d"
+      ]
+    ]
+  },
+  "copied-default-bucket": {
+    "probe": "import service\nfirst = list(service.collect('a'))\nsecond = list(service.collect('b'))\nanswer = [first, second, service.collect('c', None), service.collect('d', ['x'])]\n",
+    "base": [
+      [
+        "a"
+      ],
+      [
+        "b"
+      ],
+      [
+        "c"
+      ],
+      [
+        "x",
+        "d"
+      ]
+    ],
+    "head": [
+      [
+        "a"
+      ],
+      [
+        "b"
+      ],
+      [
+        "c"
+      ],
+      [
+        "x",
+        "d"
+      ]
+    ]
+  },
+  "uncaught-config-value": {
+    "probe": "import service\ntry:\n    answer = service.display_name()\nexcept ValueError:\n    answer = 'raised:ValueError'\n",
+    "base": "guest",
+    "head": "raised:ValueError"
+  },
+  "narrow-key-fallback": {
+    "probe": "import service\ntry:\n    answer = service.display_name()\nexcept ValueError:\n    answer = 'raised:ValueError'\n",
+    "base": "guest",
+    "head": "guest"
+  },
+  "short-page-with-cursor": {
+    "probe": "import service\nanswer = service.all_ids()\n",
+    "base": [
+      1,
+      2,
+      3
+    ],
+    "head": [
+      1
+    ]
+  },
+  "terminal-short-page": {
+    "probe": "import service\nanswer = service.all_ids()\n",
+    "base": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "head": [
+      1,
+      2,
+      3,
+      4
+    ]
+  },
+  "unicode-frame-length": {
+    "probe": "import service, payloads\nsize, body = service.frame()\ntry:\n    decoded = payloads.decode_frame(size, body)\nexcept ValueError:\n    decoded = 'rejected'\nanswer = [size, len(body), decoded]\n",
+    "base": [
+      6,
+      6,
+      "你好"
+    ],
+    "head": [
+      2,
+      6,
+      "rejected"
+    ]
+  },
+  "ascii-frame-length": {
+    "probe": "import service, payloads\nsize, body = service.frame()\ntry:\n    decoded = payloads.decode_frame(size, body)\nexcept ValueError:\n    decoded = 'rejected'\nanswer = [size, len(body), decoded]\n",
+    "base": [
+      5,
+      5,
+      "hello"
+    ],
+    "head": [
+      5,
+      5,
+      "hello"
+    ]
+  },
+  "sibling-path-prefix": {
+    "probe": "import service\nanswer = [service.allowed(name) for name in ['item1', '../database/config', '']]\n",
+    "base": [
+      true,
+      false,
+      true
+    ],
+    "head": [
+      true,
+      true,
+      true
+    ]
+  },
+  "validated-child-name": {
+    "probe": "import service\nanswer = [service.allowed(name) for name in ['item1', '../database/config', '']]\n",
+    "base": [
+      true,
+      false,
+      false
+    ],
+    "head": [
+      true,
+      false,
+      false
+    ]
+  },
+  "exclusive-expiry-relaxed": {
+    "probe": "import service\nanswer = [service.usable(now, 10) for now in [9, 10, 11]]\n",
+    "base": [
+      true,
+      false,
+      false
+    ],
+    "head": [
+      true,
+      true,
+      false
+    ]
+  },
+  "inclusive-expiry-inlined": {
+    "probe": "import service\nanswer = [service.usable(now, 10) for now in [9, 10, 11]]\n",
+    "base": [
+      true,
+      true,
+      false
+    ],
+    "head": [
+      true,
+      true,
+      false
+    ]
+  }
+}

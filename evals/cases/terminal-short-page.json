@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "terminal-short-page",
+  "scenario_id": "cursor-pagination-contract",
+  "split": "holdout",
+  "label": "clean",
+  "provenance": "Self-contained synthetic fixture authored for V4.3. New holdout family, separate from the earlier development motifs. Only deterministic behavior validation, no live model tuning.",
+  "changed_files": [
+    "service.py"
+  ],
+  "fixture": {
+    "base": {
+      "service.py": "from api import fetch_page\n\ndef all_ids():\n    result, cursor = [], None\n    while True:\n        items, cursor = fetch_page(cursor, limit=3)\n        result.extend(items)\n        if cursor is None:\n            return result\n",
+      "api.py": "def fetch_page(cursor, limit):\n    # Exactly this two-page response; only the final page is short.\n    pages = {None: ([1, 2, 3], 'next'), 'next': ([4], None)}\n    return pages[cursor]\n"
+    },
+    "head": {
+      "service.py": "from api import fetch_page\n\ndef all_ids():\n    result, cursor = [], None\n    while True:\n        items, cursor = fetch_page(cursor, limit=3)\n        result.extend(items)\n        if len(items) < 3:\n            return result\n",
+      "api.py": "def fetch_page(cursor, limit):\n    # Exactly this two-page response; only the final page is short.\n    pages = {None: ([1, 2, 3], 'next'), 'next': ([4], None)}\n    return pages[cursor]\n"
+    }
+  },
+  "expectation": {
+    "defects": [],
+    "rationale": "api.py defines the complete pagination behavior. In this fixed API the first page is full and the last is short. Both termination rules visit every page, including the last; no other page shapes are in scope.",
+    "evidence": [
+      {
+        "version": "head",
+        "path": "api.py",
+        "start_line": 1,
+        "end_line": 4,
+        "quote": "def fetch_page(cursor, limit):\n    # Exactly this two-page response; only the final page is short.\n    pages = {None: ([1, 2, 3], 'next'), 'next': ([4], None)}\n    return pages[cursor]\n"
+      },
+      {
+        "version": "base",
+        "path": "service.py",
+        "start_line": 1,
+        "end_line": 9,
+        "quote": "from api import fetch_page\n\ndef all_ids():\n    result, cursor = [], None\n    while True:\n        items, cursor = fetch_page(cursor, limit=3)\n        result.extend(items)\n        if cursor is None:\n            return result\n"
+      }
+    ],
+    "false_positive_traps": [
+      "Every cursor-based API can return arbitrary page shapes even when this fixture fixes all responses."
+    ]
+  }
+}

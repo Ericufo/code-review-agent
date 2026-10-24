@@ -23,6 +23,183 @@ workflow explicitly enables repository context.
 - Pins PR tools to head/base Git objects and local tools to an in-memory snapshot
 - Checks evidence against actual tool results and treats tool errors as incomplete
 
+## V4.3 evaluation baseline
+
+The evaluation package compares diff-only review with repository-context review
+on 20 frozen synthetic cases. It includes offline execution checks, an opt-in
+live runner with request/cost limits, and an adjudication importer. Install the
+dependencies using [Setup and manual use](#setup-and-manual-use) first. Run the
+commands below from the repository root with the virtual environment active.
+
+### Evaluation data and labels
+
+[cases/](evals/cases/) contains complete base/head source snapshots, changed
+files, expected defects, triggers, and supporting evidence. The dataset has
+10 defects and 10 clean changes: development 12 (6/6), holdout 8 (4/4), grouped
+by scenario family. The model receives only diffs and permitted source context,
+not case names, labels, or expected answers.
+
+[dataset-lock.json](evals/dataset-lock.json) freezes version
+`v4.3-synthetic-20-v1`, case hashes and splits.
+[behavior.json](evals/behavior.json) supplies executable base/head probes used
+by the tests. Changing source or labels requires versioning and refreezing the
+dataset; do not replace the lock merely to silence a mismatch.
+
+The supplied labels were AI-reviewed; the dataset maintainer accepted that review
+and waived independent human sign-off. [annotation-review.json](evals/annotation-review.json)
+records the decision against the frozen dataset hash and is read by the live
+runner. This is label provenance, not automatic approval of model findings.
+Re-running the experiment reproduces the procedure and generates new results;
+model randomness, provider alias changes and adjudication can change scores.
+Historical reports, run outputs and working notes are local artifacts, excluded
+from version control and unnecessary for executing the evaluation.
+
+### Offline checks
+
+```bash
+python -m evals.dataset
+python -m evals.runner --split all
+python -m unittest discover -s tests -v
+```
+
+These commands need no credentials, make no model requests, and publish no
+comments. The dataset validator checks all 20 cases and their lock. The runner
+uses the production graph with scripted responses: `--split all` produces 40
+case-mode records plus five failure injections. Expected `INCOMPLETE` fault
+records remain incomplete; success means their behavior matches expectations.
+Without `--split`, the runner defaults to dev (29 records including faults).
+`--suite cases` omits fault injections; `--suite reliability` runs only those.
+
+The runner prints a new output directory under ignored `evals/runs/`, containing
+`manifest.json`, `results.json`, `events.jsonl`, `report.md`, and pending
+`adjudications.json`. Use `--output PATH` only with a new directory. Mock outputs
+test the pipeline, not model precision or recall.
+
+### Bounded live evaluation
+
+The tracked [example plan](evals/live-plan.example.json) selects two dev cases
+and both modes (four records), with at most 16 requests, six requests per
+case-mode and a $1 cost upper-bound budget. Copy it to a local directory before
+editing. The following commands use Bash, including Git Bash on Windows:
+
+```bash
+mkdir -p evals/runs/plans
+cp -n evals/live-plan.example.json evals/runs/plans/pilot.json
+```
+
+Before executing, check the [provider pricing and limits](https://api-docs.deepseek.com/quick_start/pricing/).
+Update `pricing_checked_on` to the current **UTC** date, and verify
+`input_usd_per_million`, `output_usd_per_million` and `provider_context_tokens`.
+Use prices that bound peak/cache-miss usage and the model's actual input limit.
+The checked-in values are a dated template, not a promise of current pricing.
+Set `max_run_calls` and `max_cost_usd` explicitly for each run.
+
+```bash
+# Offline plan validation only; --live is required to spend API calls.
+python -m evals.live --plan evals/runs/plans/pilot.json
+```
+
+Validation should report `live: false` and four records. To execute, set
+`DEEPSEEK_API_KEY` in the environment; unlike `main.py`, this entry point does
+**not** automatically load `.env`. The following reads it without echoing it:
+
+```bash
+read -r -s -p "DEEPSEEK_API_KEY: " DEEPSEEK_API_KEY
+printf '\n'
+export DEEPSEEK_API_KEY
+# Paid model requests; runs only after the plan and budgets are configured.
+python -m evals.live --plan evals/runs/plans/pilot.json --live
+unset DEEPSEEK_API_KEY
+```
+
+Each run creates a new directory with the same artifact names as the offline
+runner. Exit 0 means all planned records completed, not that findings are correct.
+Exit 1 means incomplete/stopped execution; inspect the saved reasons. Invalid
+plans, missing credentials or an outdated pricing check are rejected before
+dispatch. The evaluation entry points never publish GitHub comments.
+
+For the full comparison, copy the example to two new local plans and change:
+
+| Setting | Formal dev | Formal holdout |
+| --- | --- | --- |
+| `split` | `"dev"` | `"holdout"` |
+| `case_ids` | `[]` (all in split) | `[]` (all in split) |
+| `holdout_config_frozen` | `false` | `true` |
+| `max_case_calls` | `6` | `6` |
+| `max_run_calls` | `96` | `64` |
+| `max_cost_usd` | `"1.00"` | `"1.00"` |
+| Planned records | 24 | 16 |
+
+Keep the other model, tool, character and output limits from the example.
+`mode_order` defaults to `["diff-only", "context"]`; either ordering is allowed
+but must contain both modes exactly once. Diff-only uses at most two requests
+(including one format repair), while context may use six, explaining the total
+request caps above. Costs can stop a run earlier even when calls remain.
+Validate each plan without `--live`, then run dev first. Freeze the final model,
+prompts and per-case budgets before holdout; the two manifests should have the
+same `comparison_config_hash`. Keep pilot attempts separate and never tune on
+holdout or combine only successful records from different attempts.
+
+Both modes use the same Responses transport with SDK retries disabled.
+Before dispatch it reserves the full configured context cost plus maximum
+output cost. Complete usage settles that reservation at the configured rates;
+missing usage or request errors retain it and stop further requests. Exceeded
+provider bounds stop the run with `bound_valid: false`. `cost_upper_bound_usd`
+is a conservative estimate dependent on correct prices and provider limits;
+`cost` remains null because billing is not observed. Budget headroom must cover
+one full reservation, so small runs can stop before spending their nominal cap.
+
+All planned records are registered before execution; each completed record is
+checkpointed. Failures, interruptions and unstarted records retain their place
+in the denominator. There is no automatic resume or retry of a failed run.
+For live request counts and usage, use transport events and resource totals;
+do not add graph-level `model_request` events to transport counts. Missing token
+usage stays null; characters are not tokens. Events store hashes, counts,
+timings and status, not prompts, raw provider responses or internal reasoning.
+
+### Adjudication and scoring
+
+Copy a live run's `adjudications.json` to `adjudications.reviewed.json` inside
+that run directory. Review findings against the **same frozen fixture** and
+execution results before editing the copy:
+
+1. Preserve run/record/case IDs, case hashes and `rubric_version`. Fill `reviewer`
+   and ISO `date`; identify AI reviewers explicitly. Mark a record `completed`
+   only after reviewing all its findings, including checking empty results.
+2. Match by root cause, relevant location, actual trigger and impact, rather
+   than title equality or severity. Use `TP` with the matching `defect_id`, or
+   `FP` with a concrete counterexample and null `defect_id`. Supply a substantive
+   `reason`. Unclear claims or genuine defects outside gold remain `pending`.
+3. Point duplicates directly to one representative using `duplicate_of`; their
+   verdict, defect ID and evidence decision must agree. Each gold defect can
+   receive at most one TP per record. For multiple independent claims in one
+   finding, replace it with distinct IDs such as `f1.c1`/`f1.c2`, each carrying
+   `source_finding_id: "f1"`; do not also score the original as a whole.
+4. For context findings, set `evidence_valid` true only when citations have the
+   correct snapshot/path/range, came from actual tool results, and together
+   support the claim. Legal citations alone are insufficient. Diff-only uses
+   null because it does not provide structured citations. Never edit raw results.
+
+```bash
+# Replace with the directory printed by the live runner.
+EVAL_RUN_DIR='evals/runs/your-run-id'
+python -m evals.score --run "$EVAL_RUN_DIR" --adjudications "$EVAL_RUN_DIR/adjudications.reviewed.json" --output "$EVAL_RUN_DIR/scored"
+```
+
+The output directory must be new. The scorer writes `scores.json` and `report.md`:
+exit 0 means adjudication is complete, 1 means pending judgments remain, and 2
+means invalid inputs/output path. Mock scoring is rejected unless `--allow-mock`
+is explicitly supplied for a pipeline exercise.
+
+Scores are grouped by split and mode, with all-case and completed-subset
+denominators. A missed gold defect is FN only if its file was reviewed; otherwise
+it is unobserved. A clean case is TN only after a complete, nonempty-eligible
+review with zero findings; incomplete clean cases are unknown. Precision is
+TP/(TP+FP); all-case recall is TP/all selected gold defects. Clean-case false
+positive rate uses completed clean cases as its denominator. Zero denominators
+are N/A, and any pending judgment suppresses final rates. Report coverage,
+failures, evidence validity, duration, calls and cost alongside quality scores.
+
 ## Setup and manual use
 
 Python 3.10+ and Git are required. Actions uses Python 3.11.
@@ -421,14 +598,15 @@ Roadmap:
   progress tracing, and a classic baseline
 - V4.2 (implemented): Controlled read/search tools, revision-bound source snapshots,
   evidence validation and bounded model/tool subgraph; development cases kept locally
-- V4.3 (planned): Retrieval experiments, review-quality evaluation, and execution records
+- V4.3 (in progress): Twenty frozen evaluation fixtures, scoring rules, structured
+  events, and an offline runner; independent human review and a live baseline to follow
 - V4.4 (planned): Minimal API service, persisted task records, and Docker delivery
 - V5 (planned): Durable queues, independent workers, recovery, and deployment scaling
 
 ## Files to commit
 
-Keep application code, agent tests, workflows, `requirements.txt`, `.env.example`
-and this README. Agent tests verify behavior and failure handling without
+Keep application code, agent tests, workflows, public `evals/` fixtures and rules,
+`requirements.txt`, `.env.example` and this README. Agent tests verify behavior and failure handling without
 depending on local experiments.
 
 The entire `experiments/` directory, virtual environments, Python/test caches,

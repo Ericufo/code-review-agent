@@ -10,6 +10,11 @@ docs/
 # Local development experiments and records; not part of the shipped agent.
 /experiments/
 
+# Evaluation outputs and working notes stay local; usage lives in the root README.
+/evals/runs/
+/evals/*.md
+/reports/
+
 # Python test/cache artifacts and OS metadata.
 *.py[cod]
 .pytest_cache/

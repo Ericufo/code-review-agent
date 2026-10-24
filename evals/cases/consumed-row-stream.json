@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "consumed-row-stream",
+  "scenario_id": "iterator-reuse",
+  "split": "dev",
+  "label": "defect",
+  "provenance": "Self-contained synthetic fixture authored for V4.3. Development scenario; not eligible for an unseen holdout.",
+  "changed_files": [
+    "service.py"
+  ],
+  "fixture": {
+    "base": {
+      "service.py": "from rows import get_rows\n\ndef summarize():\n    items = list(get_rows())\n    count = sum(1 for _ in items)\n    return count, sum(items)\n",
+      "rows.py": "def get_rows():\n    return iter([1, 2, 3])\n"
+    },
+    "head": {
+      "service.py": "from rows import get_rows\n\ndef summarize():\n    items = get_rows()\n    count = sum(1 for _ in items)\n    return count, sum(items)\n",
+      "rows.py": "def get_rows():\n    return iter([1, 2, 3])\n"
+    }
+  },
+  "expectation": {
+    "defects": [
+      {
+        "defect_id": "consumed-row-stream-regression",
+        "category": "iterator-reuse",
+        "primary_location": {
+          "version": "head",
+          "path": "service.py",
+          "start_line": 4,
+          "end_line": 4,
+          "quote": "    items = get_rows()\n"
+        },
+        "evidence": [
+          {
+            "version": "head",
+            "path": "rows.py",
+            "start_line": 1,
+            "end_line": 2,
+            "quote": "def get_rows():\n    return iter([1, 2, 3])\n"
+          }
+        ],
+        "claim": "Removing materialization causes the counting pass to exhaust a one-shot iterator.",
+        "trigger": "Call summarize on the supplied three-row source.",
+        "impact": "The count remains 3 but the total becomes 0 instead of 6.",
+        "accepted_descriptions": [
+          "Removing materialization causes the counting pass to exhaust a one-shot iterator.",
+          "The count remains 3 but the total becomes 0 instead of 6."
+        ],
+        "rejected_descriptions": [
+          "Every iterable is exhausted by the first traversal, including a list."
+        ]
+      }
+    ],
+    "rationale": "rows.py determines whether a second traversal is legal. Its iterator is exhausted after counting.",
+    "evidence": [
+      {
+        "version": "head",
+        "path": "rows.py",
+        "start_line": 1,
+        "end_line": 2,
+        "quote": "def get_rows():\n    return iter([1, 2, 3])\n"
+      },
+      {
+        "version": "base",
+        "path": "service.py",
+        "start_line": 1,
+        "end_line": 6,
+        "quote": "from rows import get_rows\n\ndef summarize():\n    items = list(get_rows())\n    count = sum(1 for _ in items)\n    return count, sum(items)\n"
+      }
+    ],
+    "false_positive_traps": [
+      "Every iterable is exhausted by the first traversal, including a list."
+    ]
+  }
+}

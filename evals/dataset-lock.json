@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "dataset_version": "v4.3-synthetic-20-v1",
+  "dataset_hash": "sha256:da24e0d92c9b57f9da127a9dbb9a721271d56c49ec3e93998fbe53e993462abb",
+  "cases": [
+    {
+      "case_id": "ascii-frame-length",
+      "case_hash": "sha256:1d55899618a3bde9af7037db6e56329e96ca6398dab11000139c98a85a7ab1af",
+      "scenario_id": "utf8-frame-size",
+      "split": "holdout",
+      "label": "clean"
+    },
+    {
+      "case_id": "consumed-row-stream",
+      "case_hash": "sha256:b3e0136c01384bf5c21a38b20ed8ed55a097bf3665ef41c6d967141f9ae43052",
+      "scenario_id": "iterator-reuse",
+      "split": "dev",
+      "label": "defect"
+    },
+    {
+      "case_id": "copied-default-bucket",
+      "case_hash": "sha256:35985838191ca1f3c8d6bfd2621507e0bc64349f2490c487bf59419676fd2761",
+      "scenario_id": "default-argument-state",
+      "split": "dev",
+      "label": "clean"
+    },
+    {
+      "case_id": "exclusive-expiry-relaxed",
+      "case_hash": "sha256:6b4a2702d15cb72b921cd1c205b76d2cbb9770eb41394b067e08c0cdce667ffb",
+      "scenario_id": "expiry-boundary-contract",
+      "split": "holdout",
+      "label": "defect"
+    },
+    {
+      "case_id": "guaranteed-profile",
+      "case_hash": "sha256:9a7cdebffddec3f9d667034ab330e2bf59732158ce470d4db81d66e13298a3a7",
+      "scenario_id": "guaranteed-nonnull-return",
+      "split": "dev",
+      "label": "clean"
+    },
+    {
+      "case_id": "inclusive-expiry-inlined",
+      "case_hash": "sha256:3212fc554b8bc6b9482d3fa0670bcf4fc8484ce0807ef290f664d6ade9c8bb80",
+      "scenario_id": "expiry-boundary-contract",
+      "split": "holdout",
+      "label": "clean"
+    },
+    {
+      "case_id": "milliseconds-normalized",
+      "case_hash": "sha256:6bbbfe38cc0d031736feafcc8b3009f4c584ed984328f0a6bbaa712c22058795",
+      "scenario_id": "duration-unit-contract",
+      "split": "dev",
+      "label": "clean"
+    },
+    {
+      "case_id": "narrow-key-fallback",
+      "case_hash": "sha256:1af78b151f7639b771c2777b7813d10c7f50b03e0bebcae6b5e2c2f1bcada56b",
+      "scenario_id": "exception-type-contract",
+      "split": "dev",
+      "label": "clean"
+    },
+    {
+      "case_id": "persistent-default-bucket",
+      "case_hash": "sha256:ca69fa099d9549b9da3c53088205936844123e8bb34c9036fd138c6c15e5a3ca",
+      "scenario_id": "default-argument-state",
+      "split": "dev",
+      "label": "defect"
+    },
+    {
+      "case_id": "reiterable-row-list",
+      "case_hash": "sha256:4ff6deafc469501a40d1e6d8eeb840379c3424ef4b8de80c13fc36a330c1dddd",
+      "scenario_id": "iterator-reuse",
+      "split": "dev",
+      "label": "clean"
+    },
+    {
+      "case_id": "seconds-rescaled",
+      "case_hash": "sha256:336597cb8c9e51d0d5503c32274fad8cfa590b964cfd408aab647f9ebc6d5166",
+      "scenario_id": "duration-unit-contract",
+      "split": "dev",
+      "label": "defect"
+    },
+    {
+      "case_id": "shared-list-sort",
+      "case_hash": "sha256:22843ee46812afc154fbde7a216527aa00cf97f0c203cd7f524f3d465e5b3310",
+      "scenario_id": "shared-mutable-return",
+      "split": "dev",
+      "label": "defect"
+    },
+    {
+      "case_id": "short-page-with-cursor",
+      "case_hash": "sha256:6c4e2d07a325b112f5c96d18f3456401b4a1324d1154cf32b0ddd8ebb0f36f3c",
+      "scenario_id": "cursor-pagination-contract",
+      "split": "holdout",
+      "label": "defect"
+    },
+    {
+      "case_id": "sibling-path-prefix",
+      "case_hash": "sha256:feb1d64797b67b1b32bf53394aabafbd4f2cb45ba5a3fcbf52d52034ff804752",
+      "scenario_id": "path-component-boundary",
+      "split": "holdout",
+      "label": "defect"
+    },
+    {
+      "case_id": "synchronous-persist",
+      "case_hash": "sha256:ac1792216e86dbe371de2baafb772ed3377a585cda14d8bcad357791fe153618",
+      "scenario_id": "async-return-contract",
+      "split": "dev",
+      "label": "clean"
+    },
+    {
+      "case_id": "terminal-short-page",
+      "case_hash": "sha256:373cfbc5531bc8970177619ec6e869b4a8644b4997c5658cb878ae52a0a9df89",
+      "scenario_id": "cursor-pagination-contract",
+      "split": "holdout",
+      "label": "clean"
+    },
+    {
+      "case_id": "unawaited-persist",
+      "case_hash": "sha256:a9888fd9c15dc8f40aae67f9d70b82905cc24977424b1688852855dccaa9fe03",
+      "scenario_id": "async-return-contract",
+      "split": "dev",
+      "label": "defect"
+    },
+    {
+      "case_id": "uncaught-config-value",
+      "case_hash": "sha256:5fd3372a988f3beb4a60840130e9ce57bcf39a1ed39faed45e0f0fb3ed894853",
+      "scenario_id": "exception-type-contract",
+      "split": "dev",
+      "label": "defect"
+    },
+    {
+      "case_id": "unicode-frame-length",
+      "case_hash": "sha256:ec432b1278088c0e1a41614d8c33e68274d84260154982c8a3bb14f6e11c1036",
+      "scenario_id": "utf8-frame-size",
+      "split": "holdout",
+      "label": "defect"
+    },
+    {
+      "case_id": "validated-child-name",
+      "case_hash": "sha256:18d89b1e4d4473f8d2c6960b13e3bb6f74bd0836e16bf1f50c4a0c9d6c5c7df2",
+      "scenario_id": "path-component-boundary",
+      "split": "holdout",
+      "label": "clean"
+    }
+  ]
+}

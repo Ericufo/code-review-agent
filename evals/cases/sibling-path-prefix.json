@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "sibling-path-prefix",
+  "scenario_id": "path-component-boundary",
+  "split": "holdout",
+  "label": "defect",
+  "provenance": "Self-contained synthetic fixture authored for V4.3. New holdout family, separate from the earlier development motifs. Only deterministic behavior validation, no live model tuning.",
+  "changed_files": [
+    "service.py"
+  ],
+  "fixture": {
+    "base": {
+      "service.py": "from pathlib import PurePosixPath\nfrom paths import resolve_name\n\ndef allowed(name):\n    root = PurePosixPath('/srv/data')\n    try:\n        candidate = resolve_name(name)\n    except ValueError:\n        return False\n    return candidate == root or root in candidate.parents\n",
+      "paths.py": "import posixpath\nfrom pathlib import PurePosixPath\n\ndef resolve_name(name):\n    return PurePosixPath(posixpath.normpath('/srv/data/' + name))\n"
+    },
+    "head": {
+      "service.py": "from pathlib import PurePosixPath\nfrom paths import resolve_name\n\ndef allowed(name):\n    root = PurePosixPath('/srv/data')\n    try:\n        candidate = resolve_name(name)\n    except ValueError:\n        return False\n    return str(candidate).startswith(str(root))\n",
+      "paths.py": "import posixpath\nfrom pathlib import PurePosixPath\n\ndef resolve_name(name):\n    return PurePosixPath(posixpath.normpath('/srv/data/' + name))\n"
+    }
+  },
+  "expectation": {
+    "defects": [
+      {
+        "defect_id": "sibling-path-prefix-regression",
+        "category": "path-component-boundary",
+        "primary_location": {
+          "version": "head",
+          "path": "service.py",
+          "start_line": 10,
+          "end_line": 10,
+          "quote": "    return str(candidate).startswith(str(root))\n"
+        },
+        "evidence": [
+          {
+            "version": "head",
+            "path": "paths.py",
+            "start_line": 1,
+            "end_line": 5,
+            "quote": "import posixpath\nfrom pathlib import PurePosixPath\n\ndef resolve_name(name):\n    return PurePosixPath(posixpath.normpath('/srv/data/' + name))\n"
+          }
+        ],
+        "claim": "A string prefix accepts a sibling directory whose name begins with data.",
+        "trigger": "Pass ../database/config through the supplied normalizer.",
+        "impact": "The policy incorrectly authorizes /srv/database/config outside /srv/data.",
+        "accepted_descriptions": [
+          "A string prefix accepts a sibling directory whose name begins with data.",
+          "The policy incorrectly authorizes /srv/database/config outside /srv/data."
+        ],
+        "rejected_descriptions": [
+          "The safe variant permits ../ traversal despite its alphanumeric-only resolver."
+        ]
+      }
+    ],
+    "rationale": "Paths are purely lexical POSIX paths; filesystem links and I/O are not part of this policy. resolve_name permits normalized parent traversal, so component containment is necessary.",
+    "evidence": [
+      {
+        "version": "head",
+        "path": "paths.py",
+        "start_line": 1,
+        "end_line": 5,
+        "quote": "import posixpath\nfrom pathlib import PurePosixPath\n\ndef resolve_name(name):\n    return PurePosixPath(posixpath.normpath('/srv/data/' + name))\n"
+      },
+      {
+        "version": "base",
+        "path": "service.py",
+        "start_line": 1,
+        "end_line": 10,
+        "quote": "from pathlib import PurePosixPath\nfrom paths import resolve_name\n\ndef allowed(name):\n    root = PurePosixPath('/srv/data')\n    try:\n        candidate = resolve_name(name)\n    except ValueError:\n        return False\n    return candidate == root or root in candidate.parents\n"
+      }
+    ],
+    "false_positive_traps": [
+      "The safe variant permits ../ traversal despite its alphanumeric-only resolver."
+    ]
+  }
+}
