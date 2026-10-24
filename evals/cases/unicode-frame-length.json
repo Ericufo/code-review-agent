@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "unicode-frame-length",
+  "scenario_id": "utf8-frame-size",
+  "split": "holdout",
+  "label": "defect",
+  "provenance": "Self-contained synthetic fixture authored for V4.3. New holdout family, separate from the earlier development motifs. Only deterministic behavior validation, no live model tuning.",
+  "changed_files": [
+    "service.py"
+  ],
+  "fixture": {
+    "base": {
+      "service.py": "from payloads import render\n\ndef frame():\n    text = render()\n    payload = text.encode('utf-8')\n    return len(payload), payload\n",
+      "payloads.py": "def render():\n    return '你好'\n\ndef decode_frame(size, payload):\n    if size != len(payload):\n        raise ValueError('frame byte count mismatch')\n    return payload.decode('utf-8')\n"
+    },
+    "head": {
+      "service.py": "from payloads import render\n\ndef frame():\n    text = render()\n    payload = text.encode('utf-8')\n    return len(text), payload\n",
+      "payloads.py": "def render():\n    return '你好'\n\ndef decode_frame(size, payload):\n    if size != len(payload):\n        raise ValueError('frame byte count mismatch')\n    return payload.decode('utf-8')\n"
+    }
+  },
+  "expectation": {
+    "defects": [
+      {
+        "defect_id": "unicode-frame-length-regression",
+        "category": "utf8-frame-size",
+        "primary_location": {
+          "version": "head",
+          "path": "service.py",
+          "start_line": 6,
+          "end_line": 6,
+          "quote": "    return len(text), payload\n"
+        },
+        "evidence": [
+          {
+            "version": "head",
+            "path": "payloads.py",
+            "start_line": 1,
+            "end_line": 7,
+            "quote": "def render():\n    return '你好'\n\ndef decode_frame(size, payload):\n    if size != len(payload):\n        raise ValueError('frame byte count mismatch')\n    return payload.decode('utf-8')\n"
+          }
+        ],
+        "claim": "The frame header counts Unicode characters but the decoder requires UTF-8 bytes.",
+        "trigger": "Frame the supplied two-character Chinese payload and decode it.",
+        "impact": "The header says 2 for a 6-byte body, so decode_frame rejects the frame.",
+        "accepted_descriptions": [
+          "The frame header counts Unicode characters but the decoder requires UTF-8 bytes.",
+          "The header says 2 for a 6-byte body, so decode_frame rejects the frame."
+        ],
+        "rejected_descriptions": [
+          "Character count and byte count always differ, even for a fixed ASCII-only producer."
+        ]
+      }
+    ],
+    "rationale": "The wire-format byte-count contract and actual producer are both in payloads.py. UTF-8 uses three bytes per supplied character.",
+    "evidence": [
+      {
+        "version": "head",
+        "path": "payloads.py",
+        "start_line": 1,
+        "end_line": 7,
+        "quote": "def render():\n    return '你好'\n\ndef decode_frame(size, payload):\n    if size != len(payload):\n        raise ValueError('frame byte count mismatch')\n    return payload.decode('utf-8')\n"
+      },
+      {
+        "version": "base",
+        "path": "service.py",
+        "start_line": 1,
+        "end_line": 6,
+        "quote": "from payloads import render\n\ndef frame():\n    text = render()\n    payload = text.encode('utf-8')\n    return len(payload), payload\n"
+      }
+    ],
+    "false_positive_traps": [
+      "Character count and byte count always differ, even for a fixed ASCII-only producer."
+    ]
+  }
+}

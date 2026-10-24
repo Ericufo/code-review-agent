@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "ascii-frame-length",
+  "scenario_id": "utf8-frame-size",
+  "split": "holdout",
+  "label": "clean",
+  "provenance": "Self-contained synthetic fixture authored for V4.3. New holdout family, separate from the earlier development motifs. Only deterministic behavior validation, no live model tuning.",
+  "changed_files": [
+    "service.py"
+  ],
+  "fixture": {
+    "base": {
+      "service.py": "from payloads import render\n\ndef frame():\n    text = render()\n    payload = text.encode('utf-8')\n    return len(payload), payload\n",
+      "payloads.py": "def render():\n    return 'hello'\n\ndef decode_frame(size, payload):\n    if size != len(payload):\n        raise ValueError('frame byte count mismatch')\n    return payload.decode('utf-8')\n"
+    },
+    "head": {
+      "service.py": "from payloads import render\n\ndef frame():\n    text = render()\n    payload = text.encode('utf-8')\n    return len(text), payload\n",
+      "payloads.py": "def render():\n    return 'hello'\n\ndef decode_frame(size, payload):\n    if size != len(payload):\n        raise ValueError('frame byte count mismatch')\n    return payload.decode('utf-8')\n"
+    }
+  },
+  "expectation": {
+    "defects": [],
+    "rationale": "The wire-format byte-count contract and actual producer are both in payloads.py. The producer returns only the fixed ASCII string hello, so character count and UTF-8 byte count are both 5; no non-ASCII inputs are supported here.",
+    "evidence": [
+      {
+        "version": "head",
+        "path": "payloads.py",
+        "start_line": 1,
+        "end_line": 7,
+        "quote": "def render():\n    return 'hello'\n\ndef decode_frame(size, payload):\n    if size != len(payload):\n        raise ValueError('frame byte count mismatch')\n    return payload.decode('utf-8')\n"
+      },
+      {
+        "version": "base",
+        "path": "service.py",
+        "start_line": 1,
+        "end_line": 6,
+        "quote": "from payloads import render\n\ndef frame():\n    text = render()\n    payload = text.encode('utf-8')\n    return len(payload), payload\n"
+      }
+    ],
+    "false_positive_traps": [
+      "Character count and byte count always differ, even for a fixed ASCII-only producer."
+    ]
+  }
+}

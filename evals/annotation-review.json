@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "dataset_version": "v4.3-synthetic-20-v1",
+  "dataset_hash": "sha256:da24e0d92c9b57f9da127a9dbb9a721271d56c49ec3e93998fbe53e993462abb",
+  "status": "ai_reviewed_user_accepted",
+  "ai_review_date": "2026-10-23",
+  "human_review": "waived_by_user",
+  "decision_date": "2026-10-23",
+  "scope": "Gold annotations only; does not adjudicate future model findings",
+  "report": "../README.md#evaluation-data-and-labels"
+}

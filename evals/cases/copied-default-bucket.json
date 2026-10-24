@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "copied-default-bucket",
+  "scenario_id": "default-argument-state",
+  "split": "dev",
+  "label": "clean",
+  "provenance": "Self-contained synthetic fixture authored for V4.3. Development scenario; not eligible for an unseen holdout.",
+  "changed_files": [
+    "service.py"
+  ],
+  "fixture": {
+    "base": {
+      "service.py": "from buckets import add_item\n\ndef collect(item, items=None):\n    if items is None:\n        items = []\n    return add_item(items, item)\n",
+      "buckets.py": "def add_item(items, item):\n    return [*items, item]\n"
+    },
+    "head": {
+      "service.py": "from buckets import add_item\n\ndef collect(item, items=[]):\n    if items is None:\n        items = []\n    return add_item(items, item)\n",
+      "buckets.py": "def add_item(items, item):\n    return [*items, item]\n"
+    }
+  },
+  "expectation": {
+    "defects": [],
+    "rationale": "buckets.py establishes whether the default list is modified. The helper always constructs a fresh list and never mutates its argument. The default remains empty; the explicit None branch is retained, so omitted, None and explicit-list arguments all preserve their behavior.",
+    "evidence": [
+      {
+        "version": "head",
+        "path": "buckets.py",
+        "start_line": 1,
+        "end_line": 2,
+        "quote": "def add_item(items, item):\n    return [*items, item]\n"
+      },
+      {
+        "version": "base",
+        "path": "service.py",
+        "start_line": 1,
+        "end_line": 6,
+        "quote": "from buckets import add_item\n\ndef collect(item, items=None):\n    if items is None:\n        items = []\n    return add_item(items, item)\n"
+      }
+    ],
+    "false_positive_traps": [
+      "A list default proves a state leak even when no operation mutates it."
+    ]
+  }
+}

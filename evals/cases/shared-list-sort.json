@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "shared-list-sort",
+  "scenario_id": "shared-mutable-return",
+  "split": "dev",
+  "label": "defect",
+  "provenance": "Adapted from the local synthetic mutation-bug development example; complete standalone source is included here. No historical model output is included.",
+  "changed_files": ["service.py"],
+  "fixture": {
+    "base": {
+      "service.py": "from store import values\n\ndef ranked_values():\n    return sorted(values())\n",
+      "store.py": "CACHE = [3, 1, 2]\n\ndef values():\n    return CACHE\n"
+    },
+    "head": {
+      "service.py": "from store import values\n\ndef ranked_values():\n    result = values()\n    result.sort()\n    return result\n",
+      "store.py": "CACHE = [3, 1, 2]\n\ndef values():\n    return CACHE\n"
+    }
+  },
+  "expectation": {
+    "defects": [
+      {
+        "defect_id": "cache-order-mutation",
+        "category": "unintended-shared-mutation",
+        "primary_location": {
+          "version": "head", "path": "service.py", "start_line": 4, "end_line": 5,
+          "quote": "    result = values()\n    result.sort()\n"
+        },
+        "evidence": [
+          {
+            "version": "head", "path": "store.py", "start_line": 1, "end_line": 4,
+            "quote": "CACHE = [3, 1, 2]\n\ndef values():\n    return CACHE\n"
+          }
+        ],
+        "claim": "ranked_values now sorts the shared CACHE in place instead of sorting a copy.",
+        "trigger": "Call ranked_values once, then read store.values().",
+        "impact": "The cache order changes from [3, 1, 2] to [1, 2, 3]; later readers observe the unintended mutation.",
+        "accepted_descriptions": [
+          "The in-place sort mutates the shared list returned by values.",
+          "Copy the returned cache before sorting to preserve other readers' order."
+        ],
+        "rejected_descriptions": [
+          "sort returns None, therefore ranked_values returns None (the function returns result).",
+          "In-place sorting is always unsafe (does not establish shared ownership).",
+          "A hypothetical concurrent race without explaining the reproducible cache mutation."
+        ]
+      }
+    ],
+    "rationale": "The diff alone cannot establish ownership of values(). store.py proves that it returns the live CACHE, while the base uses sorted to allocate a new list. Both versions return [1, 2, 3], but only head changes the underlying cache. This is one root cause, even if a review describes multiple affected readers.",
+    "evidence": [
+      {
+        "version": "base", "path": "service.py", "start_line": 3, "end_line": 4,
+        "quote": "def ranked_values():\n    return sorted(values())\n"
+      },
+      {
+        "version": "head", "path": "store.py", "start_line": 3, "end_line": 4,
+        "quote": "def values():\n    return CACHE\n"
+      }
+    ],
+    "false_positive_traps": ["The return value is still the sorted list, not None."]
+  }
+}

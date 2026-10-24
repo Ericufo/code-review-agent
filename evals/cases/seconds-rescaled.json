@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "seconds-rescaled",
+  "scenario_id": "duration-unit-contract",
+  "split": "dev",
+  "label": "defect",
+  "provenance": "Self-contained synthetic fixture authored for V4.3. Development scenario; not eligible for an unseen holdout.",
+  "changed_files": [
+    "service.py"
+  ],
+  "fixture": {
+    "base": {
+      "service.py": "from config import timeout_value\n\ndef delay_seconds():\n    return timeout_value()\n",
+      "config.py": "def timeout_value():\n    # Public contract: seconds.\n    return 30\n"
+    },
+    "head": {
+      "service.py": "from config import timeout_value\n\ndef delay_seconds():\n    return timeout_value() / 1000\n",
+      "config.py": "def timeout_value():\n    # Public contract: seconds.\n    return 30\n"
+    }
+  },
+  "expectation": {
+    "defects": [
+      {
+        "defect_id": "seconds-rescaled-regression",
+        "category": "duration-unit-contract",
+        "primary_location": {
+          "version": "head",
+          "path": "service.py",
+          "start_line": 4,
+          "end_line": 4,
+          "quote": "    return timeout_value() / 1000\n"
+        },
+        "evidence": [
+          {
+            "version": "head",
+            "path": "config.py",
+            "start_line": 1,
+            "end_line": 3,
+            "quote": "def timeout_value():\n    # Public contract: seconds.\n    return 30\n"
+          }
+        ],
+        "claim": "A value already measured in seconds is divided by 1000 again.",
+        "trigger": "Call delay_seconds with the supplied timeout configuration.",
+        "impact": "The intended 30-second delay becomes 0.03 seconds.",
+        "accepted_descriptions": [
+          "A value already measured in seconds is divided by 1000 again.",
+          "The intended 30-second delay becomes 0.03 seconds."
+        ],
+        "rejected_descriptions": [
+          "Division by 1000 is inherently wrong regardless of the source unit."
+        ]
+      }
+    ],
+    "rationale": "config.py defines the unit explicitly. The conversion introduces a thousandfold reduction.",
+    "evidence": [
+      {
+        "version": "head",
+        "path": "config.py",
+        "start_line": 1,
+        "end_line": 3,
+        "quote": "def timeout_value():\n    # Public contract: seconds.\n    return 30\n"
+      },
+      {
+        "version": "base",
+        "path": "service.py",
+        "start_line": 1,
+        "end_line": 4,
+        "quote": "from config import timeout_value\n\ndef delay_seconds():\n    return timeout_value()\n"
+      }
+    ],
+    "false_positive_traps": [
+      "Division by 1000 is inherently wrong regardless of the source unit."
+    ]
+  }
+}

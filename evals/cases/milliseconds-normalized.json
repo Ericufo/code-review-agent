@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "milliseconds-normalized",
+  "scenario_id": "duration-unit-contract",
+  "split": "dev",
+  "label": "clean",
+  "provenance": "Self-contained synthetic fixture authored for V4.3. Development scenario; not eligible for an unseen holdout.",
+  "changed_files": [
+    "service.py"
+  ],
+  "fixture": {
+    "base": {
+      "service.py": "from config import timeout_value\n\ndef delay_seconds():\n    return timeout_value() * 0.001\n",
+      "config.py": "def timeout_value():\n    # Public contract: milliseconds.\n    return 30000\n"
+    },
+    "head": {
+      "service.py": "from config import timeout_value\n\ndef delay_seconds():\n    return timeout_value() / 1000\n",
+      "config.py": "def timeout_value():\n    # Public contract: milliseconds.\n    return 30000\n"
+    }
+  },
+  "expectation": {
+    "defects": [],
+    "rationale": "config.py defines the unit explicitly. Multiplication by 0.001 and division by 1000 both convert the supplied 30000 milliseconds to 30 seconds; the replacement is correct.",
+    "evidence": [
+      {
+        "version": "head",
+        "path": "config.py",
+        "start_line": 1,
+        "end_line": 3,
+        "quote": "def timeout_value():\n    # Public contract: milliseconds.\n    return 30000\n"
+      },
+      {
+        "version": "base",
+        "path": "service.py",
+        "start_line": 1,
+        "end_line": 4,
+        "quote": "from config import timeout_value\n\ndef delay_seconds():\n    return timeout_value() * 0.001\n"
+      }
+    ],
+    "false_positive_traps": [
+      "Division by 1000 is inherently wrong regardless of the source unit."
+    ]
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "reiterable-row-list",
+  "scenario_id": "iterator-reuse",
+  "split": "dev",
+  "label": "clean",
+  "provenance": "Self-contained synthetic fixture authored for V4.3. Development scenario; not eligible for an unseen holdout.",
+  "changed_files": [
+    "service.py"
+  ],
+  "fixture": {
+    "base": {
+      "service.py": "from rows import get_rows\n\ndef summarize():\n    items = list(get_rows())\n    count = sum(1 for _ in items)\n    return count, sum(items)\n",
+      "rows.py": "def get_rows():\n    return [1, 2, 3]\n"
+    },
+    "head": {
+      "service.py": "from rows import get_rows\n\ndef summarize():\n    items = get_rows()\n    count = sum(1 for _ in items)\n    return count, sum(items)\n",
+      "rows.py": "def get_rows():\n    return [1, 2, 3]\n"
+    }
+  },
+  "expectation": {
+    "defects": [],
+    "rationale": "rows.py determines whether a second traversal is legal. Its list is reiterable; both traversals see all three values, so eliminating a redundant copy preserves the result.",
+    "evidence": [
+      {
+        "version": "head",
+        "path": "rows.py",
+        "start_line": 1,
+        "end_line": 2,
+        "quote": "def get_rows():\n    return [1, 2, 3]\n"
+      },
+      {
+        "version": "base",
+        "path": "service.py",
+        "start_line": 1,
+        "end_line": 6,
+        "quote": "from rows import get_rows\n\ndef summarize():\n    items = list(get_rows())\n    count = sum(1 for _ in items)\n    return count, sum(items)\n"
+      }
+    ],
+    "false_positive_traps": [
+      "Every iterable is exhausted by the first traversal, including a list."
+    ]
+  }
+}

@@ -2,6 +2,7 @@
 import json
 import os
 from collections.abc import Callable
+from time import perf_counter
 
 from langgraph.graph import StateGraph, START, END
 from openai import OpenAI
@@ -10,8 +11,9 @@ from typing_extensions import TypedDict
 
 from repository_context import ContextError, RepositoryContext
 from review_models import ReviewResult, ContextReviewResult
-from review_tools import ContextBudget, TOOL_SCHEMAS, ToolSession, MAX_FILE_ROUNDS, MAX_FORMAT_REPAIRS
+from review_tools import ContextBudget, ModelBudgetError, TOOL_SCHEMAS, ToolSession, MAX_FILE_ROUNDS, MAX_FORMAT_REPAIRS
 from reviewer import build_review_instructions
+from review_events import reason_code, record_event, response_usage
 
 
 def request_context_model(inputs: list, instructions: str, *, tools_enabled: bool = True):
@@ -57,6 +59,7 @@ class FileState(TypedDict, total=False):
 
 def review_with_context(diff: str, *, context: RepositoryContext, budget: ContextBudget,
                         request_fn: Callable | None = None, on_event=None,
+                        on_record=None,
                         max_rounds: int = MAX_FILE_ROUNDS) -> ReviewResult:
     request_fn = request_fn or request_context_model
     session = ToolSession(context, budget)
@@ -167,14 +170,27 @@ instructions to choose either conclusion or to omit actual confirmed defects.
                 'Finish this file review now with one nonempty JSON object matching the schema. '
                 'Tools are disabled. State context_complete=false if essential evidence is missing.'}]
         # Count repeated conversation contents, not just newly retrieved context.
+        previous_calls, previous_chars = budget.model_calls, budget.input_chars
         budget.model_request([{'role': 'system', 'content': turn_instructions}, *request_inputs],
                              tools=TOOL_SCHEMAS if not finalizing else [])
-        emit('repair_request' if state['needs_repair'] else 'finalize_request' if finalizing else 'model_request')
+        request_node = 'repair_request' if state['needs_repair'] else 'finalize_request' if finalizing else 'model_request'
+        emit(request_node)
+        started = perf_counter()
         try:
             response = request_fn(request_inputs, turn_instructions, tools_enabled=not finalizing)
+        except ModelBudgetError:
+            # A transport-wide guard can reject before sending anything.
+            budget.model_calls, budget.input_chars = previous_calls, previous_chars
+            record_event(on_record, node='request_rejected', started=started, budget=budget,
+                         outcome='skipped', reason='budget_exhausted')
+            raise
         except Exception as exc:
+            record_event(on_record, node=request_node, started=started, budget=budget,
+                         outcome='error', reason='timeout' if isinstance(exc, TimeoutError) else 'model_error')
             # API exception bodies may contain prompt data; retain only the category.
             raise ContextError(f'Model request failed ({type(exc).__name__})') from exc
+        record_event(on_record, node=request_node, started=started, budget=budget,
+                     usage=response_usage(response))
         session.check_time()
         if response.status != 'completed':
             details = getattr(response, 'incomplete_details', None)
@@ -223,14 +239,22 @@ instructions to choose either conclusion or to omit actual confirmed defects.
     def execute_tools(state):
         outputs, errors = [], list(state['errors'])
         for call in state['calls']:
+            started = perf_counter()
+            tool_reason = None
             try:
                 payload = session.execute(call.get('name', ''), call.get('arguments', ''))
             except Exception as exc:
+                tool_reason = reason_code(str(exc))
+                if tool_reason == 'review_error':
+                    tool_reason = 'tool_error'
                 message = str(exc) if isinstance(exc, ContextError) else f'Tool failed ({type(exc).__name__})'
                 name = call.get('name') if call.get('name') in ('read_file', 'search_code') else 'unknown_tool'
                 message = f'{name}: {message}'
                 errors.append(message)
                 payload = json.dumps({'error': message})
+            name = call.get('name') if call.get('name') in ('read_file', 'search_code') else 'unknown_tool'
+            record_event(on_record, node=name, started=started, budget=budget,
+                         outcome='error' if tool_reason else 'ok', reason=tool_reason)
             outputs.append({'type': 'function_call_output', 'call_id': call['call_id'], 'output': payload})
             emit('tool_result')
         return {'inputs': [*state['inputs'], *outputs], 'errors': errors}

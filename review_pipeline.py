@@ -187,6 +187,7 @@ def review_files(
     max_total_chars: int = MAX_TOTAL_CHARS,
     engine: str = "classic",
     on_step: Callable[[ReviewStep], None] | None = None,
+    on_record=None,
     context=None,
     context_request_fn=None,
     max_model_calls: int | None = None,
@@ -216,6 +217,7 @@ def review_files(
             file_diffs, review_fn=review_diff, max_files=max_files,
             max_file_chars=max_file_chars, max_total_chars=max_total_chars,
             on_step=on_step,
+            on_record=on_record,
             context=context, context_request_fn=context_request_fn,
             max_model_calls=max_model_calls,
             max_input_chars=max_input_chars, max_context_chars=max_context_chars,
@@ -223,6 +225,8 @@ def review_files(
         )
     if on_step is not None:
         raise ValueError("Step tracing requires the langgraph engine")
+    if on_record is not None:
+        raise ValueError("Structured events require the langgraph engine")
 
     issues = []
     failures: list[FileProblem] = []

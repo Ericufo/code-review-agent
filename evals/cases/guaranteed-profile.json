@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "guaranteed-profile",
+  "scenario_id": "guaranteed-nonnull-return",
+  "split": "dev",
+  "label": "clean",
+  "provenance": "Adapted from the local synthetic none-safe development example; complete standalone source is included here. It is development data, not an unseen holdout.",
+  "changed_files": ["service.py"],
+  "fixture": {
+    "base": {
+      "service.py": "from profiles import lookup\n\ndef display_name():\n    value = lookup()\n    return value.name if value else ''\n",
+      "profiles.py": "from types import SimpleNamespace\n\ndef lookup():\n    return SimpleNamespace(name='Ada')\n"
+    },
+    "head": {
+      "service.py": "from profiles import lookup\n\ndef display_name():\n    return lookup().name\n",
+      "profiles.py": "from types import SimpleNamespace\n\ndef lookup():\n    return SimpleNamespace(name='Ada')\n"
+    }
+  },
+  "expectation": {
+    "defects": [],
+    "rationale": "In this complete fixture lookup always returns a truthy SimpleNamespace with name='Ada'. Removing the guard preserves the observable result. There are no external implementations or monkeypatch contracts in scope. A hypothetical future None return is not a defect in this change. A completed review with zero findings is the expected outcome; the empty gold list says nothing about execution status.",
+    "evidence": [
+      {
+        "version": "head", "path": "profiles.py", "start_line": 1, "end_line": 4,
+        "quote": "from types import SimpleNamespace\n\ndef lookup():\n    return SimpleNamespace(name='Ada')\n"
+      },
+      {
+        "version": "base", "path": "service.py", "start_line": 3, "end_line": 5,
+        "quote": "def display_name():\n    value = lookup()\n    return value.name if value else ''\n"
+      },
+      {
+        "version": "head", "path": "service.py", "start_line": 3, "end_line": 4,
+        "quote": "def display_name():\n    return lookup().name\n"
+      }
+    ],
+    "false_positive_traps": [
+      "lookup might return None, causing AttributeError (contradicted by the implementation).",
+      "The name attribute may be absent (the implementation always sets it)."
+    ]
+  }
+}

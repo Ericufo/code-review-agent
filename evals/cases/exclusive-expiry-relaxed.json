@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "fixture_version": 1,
+  "case_id": "exclusive-expiry-relaxed",
+  "scenario_id": "expiry-boundary-contract",
+  "split": "holdout",
+  "label": "defect",
+  "provenance": "Self-contained synthetic fixture authored for V4.3. New holdout family, separate from the earlier development motifs. Only deterministic behavior validation, no live model tuning.",
+  "changed_files": [
+    "service.py"
+  ],
+  "fixture": {
+    "base": {
+      "service.py": "from policy import inclusive_deadline\n\ndef usable(now, expires):\n    return now < expires or (now == expires and inclusive_deadline())\n",
+      "policy.py": "def inclusive_deadline():\n    return False\n"
+    },
+    "head": {
+      "service.py": "from policy import inclusive_deadline\n\ndef usable(now, expires):\n    return now <= expires\n",
+      "policy.py": "def inclusive_deadline():\n    return False\n"
+    }
+  },
+  "expectation": {
+    "defects": [
+      {
+        "defect_id": "exclusive-expiry-relaxed-regression",
+        "category": "expiry-boundary-contract",
+        "primary_location": {
+          "version": "head",
+          "path": "service.py",
+          "start_line": 4,
+          "end_line": 4,
+          "quote": "    return now <= expires\n"
+        },
+        "evidence": [
+          {
+            "version": "head",
+            "path": "policy.py",
+            "start_line": 1,
+            "end_line": 2,
+            "quote": "def inclusive_deadline():\n    return False\n"
+          }
+        ],
+        "claim": "The simplified comparison makes an exclusive expiration deadline inclusive.",
+        "trigger": "Check usability at now=expires=10 under the supplied policy.",
+        "impact": "An entry that should be expired at its deadline is accepted for one boundary point.",
+        "accepted_descriptions": [
+          "The simplified comparison makes an exclusive expiration deadline inclusive.",
+          "An entry that should be expired at its deadline is accepted for one boundary point."
+        ],
+        "rejected_descriptions": [
+          "Equality at expiry is always invalid regardless of the supplied inclusive policy."
+        ]
+      }
+    ],
+    "rationale": "policy.py fixes whether equality is valid. Its False result makes the original check exclusive; <= violates that contract.",
+    "evidence": [
+      {
+        "version": "head",
+        "path": "policy.py",
+        "start_line": 1,
+        "end_line": 2,
+        "quote": "def inclusive_deadline():\n    return False\n"
+      },
+      {
+        "version": "base",
+        "path": "service.py",
+        "start_line": 1,
+        "end_line": 4,
+        "quote": "from policy import inclusive_deadline\n\ndef usable(now, expires):\n    return now < expires or (now == expires and inclusive_deadline())\n"
+      }
+    ],
+    "false_positive_traps": [
+      "Equality at expiry is always invalid regardless of the supplied inclusive policy."
+    ]
+  }
+}
