@@ -36,6 +36,30 @@ def response(data, *, status=200):
 
 
 class TestAPIConfiguration(unittest.TestCase):
+    def test_omitted_profiles_follow_model_mode_and_match_environment(self):
+        for mode in ('mock', 'live'):
+            with self.subTest(mode=mode):
+                value = settings(model_mode=mode, model_key='PRIVATE_MODEL')
+                self.assertEqual(value.profiles['default'].model_mode, mode)
+                env = {'DATABASE_URL': 'postgresql+psycopg://user:PRIVATE@localhost/test',
+                       'REVIEW_API_TOKEN': 'PRIVATE_TOKEN', 'REVIEW_ALLOWED_REPOS': 'Test/Repo',
+                       'REVIEW_MODEL_MODE': mode, 'DEEPSEEK_API_KEY': 'PRIVATE_MODEL'}
+                with patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(value.profiles, Settings.from_env().profiles)
+        first = settings()
+        first.profiles.clear()
+        self.assertIn('default', settings().profiles)
+
+    def test_explicit_profiles_are_preserved_and_mismatches_rejected(self):
+        profiles = {'small': StoredConfig(model_mode='live', max_model_calls=2)}
+        value = settings(model_mode='live', model_key='PRIVATE_MODEL', profiles=profiles)
+        self.assertEqual(value.profiles, profiles)
+        for explicit in ({}, {'default': StoredConfig()}, None):
+            with self.subTest(profiles=explicit), self.assertRaises(ValidationError):
+                settings(model_mode='live', model_key='PRIVATE_MODEL', profiles=explicit)
+        with self.assertRaisesRegex(ValidationError, 'Live mode requires a server model key'):
+            settings(model_mode='live')
+
     def test_container_database_url_quotes_password_and_requires_nonempty_secret(self):
         from review_api.container import configure_database
         from review_api.db import database_url

@@ -26,6 +26,15 @@ class Settings(BaseModel):
     max_output_tokens: int = Field(default=16384, ge=1, le=16384)
     shutdown_grace: float = Field(default=10, ge=0, le=60, allow_inf_nan=False)
 
+    @model_validator(mode='before')
+    @classmethod
+    def default_profiles(cls, values):
+        # Only derive omitted profiles; explicit mismatches must still fail closed.
+        if isinstance(values, dict) and 'profiles' not in values:
+            values = {**values, 'profiles': {
+                'default': StoredConfig(model_mode=values.get('model_mode', 'mock'))}}
+        return values
+
     @model_validator(mode='after')
     def check(self):
         database_url(self.database_url.get_secret_value())

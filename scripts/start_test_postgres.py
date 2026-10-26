@@ -19,6 +19,16 @@ def docker(*args, **kwargs):
     return subprocess.run(['docker', *args], text=True, capture_output=True, check=True, **kwargs)
 
 
+def write_test_config(config, password, port):
+    # Apply owner-only permissions at creation on POSIX, with no readable window
+    # before chmod. Exclusive creation also refuses existing files/symlinks.
+    # Windows access remains governed by the directory's inherited ACL.
+    with open(config, 'x', encoding='utf-8',
+              opener=lambda path, flags: os.open(path, flags, 0o600)) as handle:
+        handle.write(f'REVIEW_TEST_DATABASE_URL=postgresql+psycopg://review_test:{password}@127.0.0.1:{port}/review_test_admin\n')
+        handle.write(f'REVIEW_TEST_CONTAINER={NAME}\n')
+
+
 def main():
     argparse.ArgumentParser(description=__doc__).parse_args()
     config = ROOT / '.env.pgtest'
@@ -45,9 +55,7 @@ def main():
         time.sleep(1)
     if port is None:
         raise SystemExit(f'No port binding for {NAME}; inspect Docker before retrying.')
-    with config.open('x', encoding='utf-8') as handle:
-        handle.write(f'REVIEW_TEST_DATABASE_URL=postgresql+psycopg://review_test:{password}@127.0.0.1:{port}/review_test_admin\n')
-        handle.write(f'REVIEW_TEST_CONTAINER={NAME}\n')
+    write_test_config(config, password, port)
     for _ in range(30):
         probe = subprocess.run(['docker', 'exec', NAME, 'pg_isready', '-h', '127.0.0.1', '-U', 'review_test', '-d', 'review_test_admin'],
                                capture_output=True, timeout=10)
