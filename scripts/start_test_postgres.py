@@ -6,6 +6,7 @@ overwrite an existing configuration or container. This is not production Compose
 import argparse
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import time
@@ -23,10 +24,16 @@ def write_test_config(config, password, port):
     # Apply owner-only permissions at creation on POSIX, with no readable window
     # before chmod. Exclusive creation also refuses existing files/symlinks.
     # Windows access remains governed by the directory's inherited ACL.
-    with open(config, 'x', encoding='utf-8',
-              opener=lambda path, flags: os.open(path, flags, 0o600)) as handle:
-        handle.write(f'REVIEW_TEST_DATABASE_URL=postgresql+psycopg://review_test:{password}@127.0.0.1:{port}/review_test_admin\n')
-        handle.write(f'REVIEW_TEST_CONTAINER={NAME}\n')
+    handle = open(config, 'x', encoding='utf-8',
+                  opener=lambda path, flags: os.open(path, flags, 0o600))
+    try:
+        with handle as output:
+            output.write(f'REVIEW_TEST_DATABASE_URL=postgresql+psycopg://review_test:{password}@127.0.0.1:{port}/review_test_admin\n')
+            output.write(f'REVIEW_TEST_CONTAINER={NAME}\n')
+    except Exception:
+        # Only remove a file this call successfully created, never an existing one.
+        config.unlink()
+        raise
 
 
 def main():
@@ -40,24 +47,39 @@ def main():
         raise SystemExit(f'{NAME} already exists; inspect it instead of recreating it.')
     password = secrets.token_hex(24)
     env = {**os.environ, 'POSTGRES_PASSWORD': password}
-    docker('run', '--detach', '--name', NAME, '--label', 'code-review-agent.test=v442',
+    created = docker('run', '--detach', '--name', NAME, '--label', 'code-review-agent.test=v442',
            '--tmpfs', '/var/lib/postgresql:rw', '-e', 'POSTGRES_USER=review_test',
            '-e', 'POSTGRES_DB=review_test_admin', '-e', 'POSTGRES_PASSWORD',
            '-p', '127.0.0.1::5432', IMAGE, env=env, timeout=300)
-    # Save the credentials even if readiness later fails, so diagnosis/restart
-    # can reuse the created container without inspecting its secret environment.
-    port = None
+    container_id = created.stdout.strip()
+    if not re.fullmatch(r'[0-9a-f]{64}', container_id):
+        raise SystemExit(f'Docker did not return a valid container ID; inspect {NAME} before retrying.')
+    # Until credentials are saved, roll back failures by the exact ID returned
+    # by this creation, never by a name that could now belong to another container.
+    try:
+        port = None
+        for _ in range(30):
+            binding = docker('port', container_id, '5432/tcp', timeout=10).stdout.strip()
+            if binding:
+                port = int(binding.rsplit(':', 1)[1])
+                if not 1 <= port <= 65535:
+                    raise ValueError('Invalid mapped port')
+                break
+            time.sleep(1)
+        if port is None:
+            raise TimeoutError('No mapped port')
+        write_test_config(config, password, port)
+    except Exception:
+        try:
+            docker('rm', '--force', container_id, timeout=15)
+        except Exception:
+            raise SystemExit(f'Test setup failed before credentials were saved; cleanup also failed. '
+                             f'Inspect container {container_id} and {config.name} before retrying.') from None
+        raise SystemExit('Test setup failed before credentials were saved; the newly created '
+                         'container was removed. Check Docker and configuration file access before retrying.') from None
+    # Once credentials are saved, retain the container if readiness later fails.
     for _ in range(30):
-        binding = docker('port', NAME, '5432/tcp', timeout=10).stdout.strip()
-        if binding:
-            port = int(binding.rsplit(':', 1)[1])
-            break
-        time.sleep(1)
-    if port is None:
-        raise SystemExit(f'No port binding for {NAME}; inspect Docker before retrying.')
-    write_test_config(config, password, port)
-    for _ in range(30):
-        probe = subprocess.run(['docker', 'exec', NAME, 'pg_isready', '-h', '127.0.0.1', '-U', 'review_test', '-d', 'review_test_admin'],
+        probe = subprocess.run(['docker', 'exec', container_id, 'pg_isready', '-h', '127.0.0.1', '-U', 'review_test', '-d', 'review_test_admin'],
                                capture_output=True, timeout=10)
         if probe.returncode == 0:
             print(f'PostgreSQL test container ready: {NAME}, local port {port}; credentials in .env.pgtest')
