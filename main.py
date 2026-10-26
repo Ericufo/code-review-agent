@@ -1,60 +1,25 @@
 import sys
-import subprocess
 import argparse
 import json
 
 from dotenv import load_dotenv
-load_dotenv()
 
-from git_utils import get_git_diff
-from diff_parser import FileDiff, parse_git_diff
-from review_pipeline import ReviewBatch, ReviewStep, review_files
+from review_pipeline import ReviewBatch, ReviewStep
 from github_client import GitHubClient, GitHubAPIError
 from github_comment import GitHubCommentManager
-from github_diff import github_files_to_diff
 from github_review import (
     PullRequestRevision,
     ReviewSupersededError,
     ensure_current_revision,
-    get_review_revision,
 )
 from review_formatter import format_review_batch
-from repository_context import capture_local_context, GitHubRepositoryContext, allowed_path
+from repository_context import allowed_path
 from review_tools import ContextBudget, MAX_FILE_ROUNDS, MAX_FORMAT_REPAIRS
+from review_service import (
+    CONTEXT_BUDGET_OPTIONS, ReviewConfig, prepare_local_review,
+    prepare_github_review, execute_review,
+)
 
-
-CONTEXT_BUDGET_OPTIONS = ('max_model_calls', 'max_input_chars', 'max_context_chars', 'max_tool_calls')
-
-
-def get_local_files() -> list[FileDiff]:
-    try:
-        diff = get_git_diff()
-    except subprocess.CalledProcessError as exc:
-        message = exc.stderr.strip() if exc.stderr else str(exc)
-        raise RuntimeError(f"Git error: {message}")
-
-    if not diff.strip():
-        return []
-
-    return parse_git_diff(diff)
-
-
-def get_github_files(client: GitHubClient, pr_number: int) -> list[FileDiff]:
-    files = client.get_pull_request_files(
-        number=pr_number,
-    )
-
-    return github_files_to_diff(files)
-
-
-def select_local_files(files: list[FileDiff], paths: list[str] | None) -> list[FileDiff]:
-    if paths is None:
-        return files
-    requested = set(paths)
-    missing = requested - {item.path for item in files}
-    if missing:
-        raise ValueError('Selected paths must have current Git changes: ' + json.dumps(sorted(missing)))
-    return [item for item in files if item.path in requested]
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -175,32 +140,25 @@ def print_review(batch: ReviewBatch) -> None:
 
 
 def main() -> int:
+    load_dotenv()
     args = parse_args()
     client = None
-    context = None
+    config = ReviewConfig(engine=args.engine, context_mode=args.context,
+        **{key: getattr(args, key) for key in CONTEXT_BUDGET_OPTIONS})
 
     try:
         if args.github_pr is not None:
             client = GitHubClient()
-            revision = get_review_revision(
-                client, args.github_pr, expected_head_sha=args.expected_head_sha,
+            prepared = prepare_github_review(
+                client, args.github_pr, config, expected_head_sha=args.expected_head_sha,
             )
-            file_diffs = get_github_files(client, args.github_pr)
-            # Reject a mixed file list even if its file count stayed the same.
-            ensure_current_revision(client, args.github_pr, revision)
-            if args.context == "repo" and file_diffs:
-                context = GitHubRepositoryContext(client, revision)
+            revision = prepared.revision
             source = f"GitHub PR #{args.github_pr}"
         else:
-            if args.context == "repo":
-                context = capture_local_context()
-            all_local_files = get_local_files()
-            file_diffs = select_local_files(all_local_files, args.paths)
-            if context is not None:
-                context.ensure_unchanged()
+            prepared = prepare_local_review(config, paths=args.paths)
             source = "current Git changes"
             if args.paths is not None:
-                source = 'selected local changes ' + json.dumps([item.path for item in file_diffs])
+                source = 'selected local changes ' + json.dumps([item.path for item in prepared.files])
 
     except ReviewSupersededError as exc:
         print(f"Review skipped: {exc}")
@@ -217,6 +175,7 @@ def main() -> int:
         print(f"Input error: {exc}", file=sys.stderr)
         return 1
 
+    file_diffs, context = prepared.files, prepared.context
     if not file_diffs and client is None:
         print("No changes to review.")
         return 0
@@ -226,15 +185,14 @@ def main() -> int:
     print(f"Context mode: {args.context}")
     if context is not None:
         print(f"Context revision: {context.revisions['head']}")
-        limits = ContextBudget(**{key: getattr(args, key) for key in CONTEXT_BUDGET_OPTIONS
-                                 if getattr(args, key) is not None})
+        limits = config.context_limits()
         print('Context budgets: ' + ', '.join(f'{key}={getattr(limits, key)}' for key in CONTEXT_BUDGET_OPTIONS))
     print(f"Reviewing {source}...")
     excluded_count = sum(not allowed_path(item.path) for item in file_diffs) if context is not None else 0
     candidate_count = len(file_diffs) - excluded_count
     print(f"Detected {len(file_diffs)} changed file(s); candidates: {candidate_count}; excluded: {excluded_count}.")
     if args.paths is not None:
-        print(f"Selection covers {len(file_diffs)}/{len(all_local_files)} detected local changes; other changes are not reviewed.")
+        print(f"Selection covers {len(file_diffs)}/{prepared.detected_files} detected local changes; other changes are not reviewed.")
     max_file_requests = MAX_FILE_ROUNDS + MAX_FORMAT_REPAIRS
     if context is not None and candidate_count * max_file_requests > limits.max_model_calls:
         print(f"Budget note: {candidate_count} candidates can require up to {candidate_count * max_file_requests} model requests "
@@ -245,17 +203,10 @@ def main() -> int:
         print(f"Base commit: {revision.base_sha}")
 
     try:
-        batch = review_files(
-            file_diffs, engine=args.engine,
+        batch = execute_review(
+            prepared,
             on_step=print_review_step if args.trace else None,
-            context=context,
-            **({key: getattr(args, key) for key in CONTEXT_BUDGET_OPTIONS if getattr(args, key) is not None}
-               if context is not None else {}),
         )
-        if context is not None and client is None:
-            context.ensure_unchanged()
-            if select_local_files(get_local_files(), args.paths) != file_diffs:
-                raise RuntimeError("Local diff changed during review; rerun required")
         if client is not None and args.no_publish:
             ensure_current_revision(client, args.github_pr, revision)
 

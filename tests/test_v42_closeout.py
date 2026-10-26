@@ -78,7 +78,7 @@ class TestCloseoutCLI(unittest.TestCase):
         ctx = context()
         ctx.ensure_unchanged = Mock()
         files = [FileDiff('app.py', 'one'), FileDiff('dep.py', 'two')]
-        with patch('main.get_local_files', return_value=files), patch('main.capture_local_context', return_value=ctx), \
+        with patch('review_service.get_local_files', return_value=files), patch('review_service.capture_local_context', return_value=ctx), \
              patch('context_review.request_context_model', return_value=response()) as model:
             code, output = self.run_cli('--context', 'repo', '--paths', 'dep.py')
         self.assertEqual(code, 0)
@@ -89,8 +89,8 @@ class TestCloseoutCLI(unittest.TestCase):
         self.assertIn('dep.py', output)
 
     def test_missing_selection_fails_before_api_and_subset_pr_is_rejected(self):
-        with patch('main.get_local_files', return_value=[FileDiff('app.py', 'one')]), \
-             patch('main.review_files') as review:
+        with patch('review_service.get_local_files', return_value=[FileDiff('app.py', 'one')]), \
+             patch('review_service.review_files') as review:
             code, output = self.run_cli('--paths', 'typo.py')
         self.assertEqual(code, 1)
         self.assertIn('must have current Git changes', output)
@@ -102,8 +102,8 @@ class TestCloseoutCLI(unittest.TestCase):
     def test_only_excluded_cli_is_exit_zero_without_model(self):
         ctx = context()
         ctx.ensure_unchanged = Mock()
-        with patch('main.get_local_files', return_value=[FileDiff('README.md', 'text')]), \
-             patch('main.capture_local_context', return_value=ctx), \
+        with patch('review_service.get_local_files', return_value=[FileDiff('README.md', 'text')]), \
+             patch('review_service.capture_local_context', return_value=ctx), \
              patch('context_review.request_context_model') as model:
             code, output = self.run_cli('--context', 'repo')
         self.assertEqual(code, 0)

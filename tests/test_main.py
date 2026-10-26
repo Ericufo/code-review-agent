@@ -241,7 +241,7 @@ class TestMain(unittest.TestCase):
 
     def test_local_binary_diff_reports_incomplete_without_github(self):
         binary = FileDiff("image.png", "Binary files a/image.png and b/image.png differ\n")
-        with patch("main.get_local_files", return_value=[binary]):
+        with patch("review_service.get_local_files", return_value=[binary]):
             exit_code, stdout, stderr = self.run_cli()
 
         self.assertEqual(exit_code, 1)
@@ -253,7 +253,7 @@ class TestMain(unittest.TestCase):
         self.client_factory.assert_not_called()
 
     def test_local_review_does_not_use_github(self):
-        with patch("main.get_local_files", return_value=[FileDiff("local.py", "diff")]):
+        with patch("review_service.get_local_files", return_value=[FileDiff("local.py", "diff")]):
             exit_code, stdout, stderr = self.run_cli()
 
         self.assertEqual(exit_code, 0)
@@ -294,7 +294,7 @@ class TestMain(unittest.TestCase):
         self.client.create_issue_comment.assert_called_once()
 
     def test_empty_local_diff_does_not_review_or_publish(self):
-        with patch("main.get_local_files", return_value=[]):
+        with patch("review_service.get_local_files", return_value=[]):
             exit_code, stdout, stderr = self.run_cli()
         self.assertEqual(exit_code, 0)
         self.assertEqual(stderr, "")

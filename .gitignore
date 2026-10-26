@@ -6,6 +6,7 @@ docs/
 # Local credentials; keep the shareable configuration template.
 .env.*
 !.env.example
+!.env.compose.example
 
 # Local development experiments and records; not part of the shipped agent.
 /experiments/

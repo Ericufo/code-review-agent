@@ -14,6 +14,7 @@ from review_models import ReviewResult, ContextReviewResult
 from review_tools import ContextBudget, ModelBudgetError, TOOL_SCHEMAS, ToolSession, MAX_FILE_ROUNDS, MAX_FORMAT_REPAIRS
 from reviewer import build_review_instructions
 from review_events import reason_code, record_event, response_usage
+from review_checkpoint import ReviewRunError
 
 
 def request_context_model(inputs: list, instructions: str, *, tools_enabled: bool = True):
@@ -60,6 +61,7 @@ class FileState(TypedDict, total=False):
 def review_with_context(diff: str, *, context: RepositoryContext, budget: ContextBudget,
                         request_fn: Callable | None = None, on_event=None,
                         on_record=None,
+                        before_work: Callable[[], None] | None = None,
                         max_rounds: int = MAX_FILE_ROUNDS) -> ReviewResult:
     request_fn = request_fn or request_context_model
     session = ToolSession(context, budget)
@@ -129,6 +131,8 @@ instructions to choose either conclusion or to omit actual confirmed defects.
         raise ContextError(reason)
 
     def model(state):
+        if before_work is not None:
+            before_work()
         session.check_time()
         # One tools-disabled repair may follow the last normal round, but
         # still spends batch calls/input and remains under the file deadline.
@@ -178,6 +182,8 @@ instructions to choose either conclusion or to omit actual confirmed defects.
         started = perf_counter()
         try:
             response = request_fn(request_inputs, turn_instructions, tools_enabled=not finalizing)
+        except ReviewRunError:
+            raise
         except ModelBudgetError:
             # A transport-wide guard can reject before sending anything.
             budget.model_calls, budget.input_chars = previous_calls, previous_chars
@@ -239,10 +245,14 @@ instructions to choose either conclusion or to omit actual confirmed defects.
     def execute_tools(state):
         outputs, errors = [], list(state['errors'])
         for call in state['calls']:
+            if before_work is not None:
+                before_work()
             started = perf_counter()
             tool_reason = None
             try:
                 payload = session.execute(call.get('name', ''), call.get('arguments', ''))
+            except ReviewRunError:
+                raise
             except Exception as exc:
                 tool_reason = reason_code(str(exc))
                 if tool_reason == 'review_error':
@@ -266,6 +276,8 @@ instructions to choose either conclusion or to omit actual confirmed defects.
     builder.add_conditional_edges('model', lambda s: 'tools' if s['calls'] else 'repair' if s['needs_repair'] else 'end',
                                   {'tools': 'tools', 'repair': 'model', 'end': END})
     builder.add_edge('tools', 'model')
+    if before_work is not None:
+        before_work()
     state = builder.compile().invoke({
         'inputs': [{'role': 'user', 'content': json.dumps({
             'repository': context.repository, 'revisions': context.revisions,

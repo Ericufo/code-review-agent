@@ -479,6 +479,439 @@ the final check and the comment request. The comment's head/base SHA identifies
 the reviewed revision. Independent manual invocations are not serialized by
 Actions concurrency.
 
+## Shared application service (V4.4.1)
+
+`review_service.py` provides `ReviewConfig`, `PreparedReview`,
+`prepare_local_review`, `prepare_github_review`, and `execute_review` for CLI and
+future API callers. The CLI uses this service; printing, exit codes, and comment
+publication stay in `main.py`. Importing the service does not load `.env`, start
+threads, create clients, or perform network/model requests. The CLI loads its
+environment when `main()` runs. This core service does not import the optional
+API/database packages. PostgreSQL storage, the background executor, and HTTP
+routes are described below.
+
+An offline call with an injected model, requiring no credentials:
+
+```python
+from diff_parser import FileDiff
+from review_models import ReviewResult
+from review_service import PreparedReview, ReviewConfig, execute_review
+
+work = PreparedReview(
+    files=(FileDiff("example.py", "@@ -1 +1 @@\n-old()\n+new()"),),
+    config=ReviewConfig(),
+)
+batch = execute_review(
+    work, review_fn=lambda diff: ReviewResult(summary="", issues=[]),
+)
+print(batch.status)  # COMPLETE: deterministic mock, not a real review
+```
+
+Repository-mode callers supply `ReviewConfig(context_mode="repo")`, a
+`RepositoryContext`, and `context_request_fn` for offline execution. Without
+injected model functions, execution uses the existing configured model paths.
+Preparation accepts injected file loaders and context factories; tests must
+replace GitHub access as well as the model to be fully offline. PR preparation
+captures head/base and rejects a changed revision after listing files. That
+mutable PR-list endpoint is not an immutable diff provider for future queued
+tasks; queued execution must use its saved revision rather than prepare a new PR.
+
+Optional `sink` implementations follow `ReviewSink` in `review_checkpoint.py`:
+
+- `record_event(event)` receives non-completion events.
+- `file_completed(checkpoint)` receives the authoritative path, reviewed/failed/
+  skipped/excluded status, validated findings and evidence, safe reason code,
+  and the corresponding completion event. Persist these together; the completion
+  event is not also sent through `record_event`.
+- `finish(batch)` is called after final input validation and must commit the
+  final summary and task status together. A batch can be `INCOMPLETE` or
+  `NO_ELIGIBLE_FILES`; successful execution does not mean defect-free code.
+
+A sink error latches `ReviewPersistenceError` (`code="persistence_failed"`),
+aborts further work, and prevents a successful return. Previously saved file
+results remain the sink's responsibility. Ordinary `on_record` observers retain
+their warning-and-continue behavior. Event counters can be cumulative; missing
+usage stays unknown. These contracts do not provide database transactions or
+restart/resume by themselves. The CLI uses the no-persistence path and still
+needs only the core dependencies.
+
+## PostgreSQL storage (V4.4.2)
+
+Install the optional service dependencies in the existing virtual environment:
+
+```bash
+python -m pip install -r requirements-api.txt
+```
+
+This includes pinned SQLAlchemy 2.x, psycopg 3, Alembic, FastAPI/Uvicorn, and
+Starlette's actual `httpx` TestClient dependency (`httpx2` is a different package).
+The tested combination requires Python 3.11 or newer; local verification used
+Python 3.13.5. `pip check` and a real in-process FastAPI TestClient smoke test pass.
+Installing these dependencies does not start an HTTP service.
+
+`review_api/models.py` defines tasks, files, findings, and events.
+`ReviewRepository` provides submission/idempotent replay, a single active task
+claim, atomic file/finding/completion-event writes, final summaries, terminal
+failure/interruption, and task/result/event queries. `find_replay` must be called
+before fetching new PR metadata; its fingerprint depends only on the normalized
+client request. Replays return the original task even after the PR or server
+configuration changes. Admission and claim use short PostgreSQL transactions;
+no GitHub or model calls run inside them.
+
+Task transitions and immutable revision/config snapshots have database guards.
+A partial unique index permits at most one running task. A file completion event
+is stored in the same transaction as its file and findings. Finalization checks
+that the supplied batch matches saved checkpoints, then commits the final
+summary and `finished` together. Raw exception text is not stored: file failures
+use safe reason codes. Task results distinguish execution completion from review
+coverage. Missing usage remains null, and cumulative counters are not summed.
+
+Each repository operation owns its Session. Task listing uses a `(created_at,id)`
+cursor; events use per-task increasing sequence numbers. Task pages allow 1–100
+items and event pages 1–500. Storage accepts normalized relative paths up to
+512 characters, rejecting longer paths explicitly rather than truncating them.
+`schema_ready(engine)` checks the applied Alembic revision without modifying it.
+
+For a separately provisioned application database, set `DATABASE_URL` to a
+`postgresql+psycopg://USER:PASSWORD@HOST:PORT/DATABASE` URL with a nonempty password,
+then explicitly apply migrations:
+
+```bash
+python -m alembic upgrade head
+```
+
+The migration command reads the process environment, not `.env` automatically.
+It does not run inside API requests. Repeating `upgrade head` is harmless.
+No application database or production Compose setup is created by this step.
+
+### Dedicated PostgreSQL tests
+
+With Docker Desktop running in Linux-container mode, a native PostgreSQL install
+is unnecessary. From the repository root, the following helper creates a local
+test container using the verified PostgreSQL 18.6 image digest:
+
+```bash
+python scripts/start_test_postgres.py
+python scripts/run_postgres_tests.py --env-file .env.pgtest
+```
+
+The startup helper binds a random port on `127.0.0.1`, generates a password, and
+stores test credentials in ignored `.env.pgtest`. It refuses to overwrite an
+existing configuration or container; an already configured environment can run
+the second command directly. The container uses a temporary memory filesystem:
+stopping/restarting it loses its database contents. This is intentional for
+tests and is not the persistent application deployment planned for V4.4.5.
+The [official PostgreSQL image](https://hub.docker.com/_/postgres) uses
+`/var/lib/postgresql` as its volume target for PostgreSQL 18 and newer.
+
+The test runner accepts only a local `review_test_admin` database URL, creates a
+new `review_test_<uuid>` database, applies migrations there, and drops only that
+new database on exit. It never migrates or clears the supplied admin database.
+It cannot use a development database URL to clear application records. You may
+instead set `REVIEW_TEST_DATABASE_URL` in the process environment and omit
+`--env-file`. Database failures fail this command; they are not silently skipped.
+
+The PostgreSQL checks cover empty/repeated migrations and schema drift,
+concurrent idempotency/admission/claim/event writes, transaction rollback,
+invalid transitions, immutable snapshots, duplicate keys, partial results,
+pagination, mock-service integration, and dependency/test-environment safety.
+Run core regressions separately with `python -m unittest discover -s tests -v`;
+they remain usable without the optional storage installation. These database
+tests live in `tests/postgres/` and are deliberately outside core discovery.
+They also exercise executor ownership, startup interruption, lost notifications,
+process termination, persistence failures, and bounded shutdown with mock inputs.
+HTTP integration tests use that same real database with fixture upstreams.
+Container acceptance is described below. The live model demonstration remains a later step.
+
+## Background executor (V4.4.3)
+
+`review_api.executor.ReviewExecutor` runs one task at a time in a single daemon
+thread. Construction and imports do not start it. Application lifecycle code
+must call `start()` and `stop()` outside the ASGI event loop. The V4.4.4 application
+factory below provides this lifespan wiring.
+
+Startup acquires a dedicated PostgreSQL session advisory lock and checks the
+migration revision before marking old `queued`/`running` tasks `interrupted`.
+Only then does `start()` return true. A second executor returns false with
+`failure_code="executor_busy"` and does not alter existing tasks. The lock
+connection is never pooled or reconnected. Committed database rows drive
+scheduling; `notify()` only wakes the worker sooner, and polling handles lost
+notifications. Submit through `executor.submit(...)` to enforce the readiness
+gate inside the admission transaction as well as before it.
+
+The required server-owned `prepare(task, before_work)` dependency must produce
+a `PreparedReview` using the task's saved head/base and configuration, and call
+`before_work()` before each external request during preparation. The executor
+rejects mismatching revisions/configuration, local repository contexts, and
+CLI validation callbacks. It also guards context reads and model/tool dispatch.
+Tests inject repository fixtures; V4.4.4 uses a read-only GitHub adapter for the
+normal server. Do not use `prepare_github_review` to silently refresh the revision
+of an already queued task.
+
+Model mode comes from the saved configuration. Mock mode uses a deterministic
+empty result, labelled `mock` in storage, without falling back to environment
+credentials. Live mode is rejected unless both `allow_live=True` and an explicit
+model transport are supplied. That transport must enforce timeouts and visible
+retry accounting; the executor does not make an arbitrary callable interruptible.
+The mock result validates plumbing, not the quality of a PR review.
+
+`DatabaseReviewSink` commits events, file checkpoints, and the final summary
+through the repository. A persistence or ownership failure clears readiness and
+blocks subsequent dispatch at the next guarded boundary. An in-flight request
+cannot be recalled; missing resource records remain explicitly incomplete.
+Already committed files survive. A normal per-file model error can still produce
+`finished` with `INCOMPLETE` coverage; a persistence failure cannot produce a
+successful final summary. Old work is never automatically retried on restart.
+
+`request_stop()` stops admission and new work while allowing an in-flight response
+to be saved. `stop(grace=10)` waits at most that many seconds (0–60 permitted).
+It returns true when the worker has exited; false means the grace expired.
+After expiry, late checkpoints are rejected, but the worker retains its session
+lock until it actually exits or its process ends. Python cannot forcibly stop
+an arbitrary blocked request. The process supervisor must finish shutdown when
+`stop()` returns false; the next lock-owning startup interrupts leftover tasks.
+Do not start a replacement worker in the same process after a false result.
+
+This is a single-instance guard, not a distributed lease or exactly-once protocol.
+The tests use an isolated database and include killing a separate worker process
+after its first file is committed; this does not establish container-volume
+durability; the separate Compose acceptance below covers that boundary.
+
+## HTTP task API (V4.4.4)
+
+`review_api.app.create_app()` constructs the FastAPI app; lifespan creates its
+database repository and executor. Imports do not load environment files, connect,
+or start threads. Startup does not apply migrations. Synchronous routes and
+executor start/stop waits run outside the ASGI event loop. The API only analyzes:
+it has no comment publication, cancel, retry, or arbitrary local-path endpoint.
+
+Configure a separately provisioned application database and server environment
+using `.env.example`. The existing `.env.pgtest` is only for isolated tests.
+
+| Setting | Meaning |
+| --- | --- |
+| `DATABASE_URL` | Required PostgreSQL URL with password; see storage setup above |
+| `REVIEW_API_TOKEN` | Required nonempty ASCII bearer token, without whitespace |
+| `REVIEW_ALLOWED_REPOS` | Required comma-separated `owner/repo` allowlist; case normalized |
+| `GITHUB_TOKEN` | Server credential for GitHub reads; optional for public repositories |
+| `REVIEW_MODEL_MODE` | `mock` by default; `live` explicitly enables the configured model |
+| `DEEPSEEK_API_KEY` | Required only for `live`; never accepted in a request body |
+| `REVIEW_PROFILES_JSON` | Named budget overrides, default `{}` creates profile `default` |
+| `REVIEW_WAITING_LIMIT` | 1–8 waiting tasks, default 8; one active task |
+| `REVIEW_GITHUB_TIMEOUT` | Request timeout in seconds, default 10, maximum 30 |
+| `REVIEW_MODEL_TIMEOUT` | Model request timeout in seconds, default 45, maximum 60 |
+| `REVIEW_MAX_OUTPUT_TOKENS` | Output cap, default/maximum 16384 |
+| `REVIEW_SHUTDOWN_GRACE` | Shutdown wait in seconds, default 10, range 0–60 |
+
+Profiles can lower the core ceilings: 30 files, 20,000 diff characters per file,
+160,000 total diff characters, 64 model calls, 2,000,000 input characters,
+256,000 context characters, and 160 tool calls. For example:
+`{"default":{"max_files":10,"max_model_calls":20},"small":{"max_files":3,"max_model_calls":6}}`.
+Unspecified values retain defaults. Model mode is server-wide; clients choose a
+profile name and cannot override budgets, providers, keys, model URLs, or publish.
+These are call/character/token caps, not a dollar spending ledger.
+
+If the variables are already exported to your shell, migrate and start with:
+
+```bash
+python -m alembic upgrade head
+python -m uvicorn review_api.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1
+```
+
+For an explicitly chosen local `.env` file, load it for each entry point:
+
+```bash
+python -c "from dotenv import load_dotenv; from alembic.config import Config; from alembic import command; load_dotenv('.env'); command.upgrade(Config('alembic.ini'), 'head')"
+python -m uvicorn review_api.app:create_app --factory --env-file .env --host 127.0.0.1 --port 8000 --workers 1
+```
+
+Use one worker and no reload. Failed database/schema/ownership startup leaves
+`/health/live` available, but `/health/ready` returns 503 and new submissions are
+rejected. Shutdown grace expiry raises a safe lifespan error so the server process
+can exit; the old worker retains its lock until it exits. Restart never resumes
+an unfinished task. Compose startup and volume handling are described below.
+
+| Route | Result |
+| --- | --- |
+| `POST /api/v1/reviews` | 202 new task; 200 idempotent replay |
+| `GET /api/v1/reviews?limit=20&cursor=...` | Task page and `next_cursor`; maximum 100 |
+| `GET /api/v1/reviews/{id}` | Execution/review state, versions, config, counts and timestamps |
+| `GET /api/v1/reviews/{id}/result` | Saved files/findings/evidence, `partial`, model mode and resource completeness |
+| `GET /api/v1/reviews/{id}/events?after_seq=0&limit=100` | Ordered events, `has_more`, `next_after_seq`; maximum 500 |
+| `GET /health/live` | Unauthenticated liveness, no configuration details |
+| `GET /health/ready` | Unauthenticated database/schema/executor readiness |
+
+All `/api/` requests require `Authorization: Bearer <REVIEW_API_TOKEN>`.
+This is one trusted caller group: anyone with that token can read all stored
+tasks. It is not per-user authentication or tenant isolation. Swagger/OpenAPI
+HTTP endpoints are disabled; DTOs and route definitions live in `review_api/`.
+
+Example request (replace the token and allowlisted repository):
+
+```http
+POST /api/v1/reviews HTTP/1.1
+Host: 127.0.0.1:8000
+Authorization: Bearer <REVIEW_API_TOKEN>
+Idempotency-Key: 51f9d728-f943-48e9-9368-f9cc9aba514d
+Content-Type: application/json
+
+{"owner":"allowed-owner","repo":"allowed-repo","pr_number":5,"profile":"default"}
+```
+
+The response contains `task_id`, `execution_status`, `model_mode`, head/base SHAs,
+and relative `status_url`, `result_url`, `events_url`. Poll the status URL using
+the same bearer token until `finished`, `failed`, or `interrupted`, then fetch the
+result URL. Partial files may be queried sooner. `finished` with `INCOMPLETE`
+does not mean review passed, and `NO_ELIGIBLE_FILES` is not a defect-free verdict.
+
+The UUID idempotency key is mandatory. The same key and normalized request return
+the original task before reading current PR metadata or resolving changed budget
+profiles, even if the queue is full. Different input with the same key returns
+409. Supply a new key for a new review. Optional `expected_head_sha` must be a
+40-character lowercase SHA; a mismatch, draft, or closed PR returns 409 without
+creating a task. Unknown body/query fields are rejected. POST bodies are capped
+at 16 KiB, including streamed requests. No result truncation is hidden.
+
+Errors contain only `code`, `message`, and `request_id`, with the same generated
+ID in `X-Request-ID`: 401 authentication, 403 repository denied, 404 unknown task,
+409 conflict/unreviewable PR, 413 oversized body, 422 invalid input/profile/cursor,
+429 queue full, 502 upstream metadata failure, 504 upstream timeout, 503 unavailable
+service/storage, or 500 unexpected internal failure. Responses do not echo input,
+tokens, database errors, source text, or upstream exception bodies.
+
+`GitHubProvider` reads PR metadata once at submission, then uses an immutable
+`compare/{base_sha}...{head_sha}` request and exact Git trees/blobs. It does not
+follow redirects, has no publication methods, caps each response at 8 MB, and
+uses no automatic retries. A comparison containing 300 or more files fails the
+task: the [GitHub comparison endpoint](https://docs.github.com/en/rest/commits/commits#compare-two-commits)
+only supplies up to 300 files, so this boundary cannot establish a complete list.
+Oversized/truncated source trees are rejected by the existing context policy.
+Unavailable patches remain explicit skipped files rather than clean reviews.
+
+`mock` disables model requests but the normal server still reads GitHub. Fully
+offline HTTP tests inject a fixture provider as well as the mock model. Live
+transport uses the server key, fixed DeepSeek endpoint/model, configured timeout
+and output cap, and `max_retries=0`; the API does not import the evaluation ledger.
+No live GitHub or paid model calls were used for V4.4.4 verification. Its checks
+cover the real database, real executor and ASGI app, plus offline provider tests;
+they do not establish real credential validity or hosted deployment readiness.
+
+## Docker Compose deployment (V4.4.5)
+
+Docker Desktop must be running Linux containers, or use Docker Engine with
+Compose v2 on Linux. Native PostgreSQL is not required. The application image
+uses the verified Python 3.13 slim Bookworm digest; PostgreSQL 18.6 is also pinned
+by digest. The image runs as UID/GID 10001 with a read-only application filesystem,
+and its build context uses an allowlist that excludes credentials, Git history,
+virtual environments, personal documents, evaluation outputs, and test fixtures.
+
+Copy `.env.compose.example` to an untracked `.env.compose`, generate separate
+random database/API secrets, and set `REVIEW_ALLOWED_REPOS`. Keep model mode
+`mock` until a live run is explicitly intended. Generate each secret with:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+The Compose launcher constructs `DATABASE_URL` from the database fields with
+proper password quoting; do not copy a host `DATABASE_URL` into the container.
+No credentials are passed as build arguments or embedded in the image. A normal
+mock deployment still reads GitHub on a new submission; fully offline fixtures
+are exclusive to the acceptance runner described below.
+
+```bash
+docker compose --env-file .env.compose up --build -d --wait
+docker compose --env-file .env.compose ps -a
+```
+
+Startup follows **healthy database → successful one-time migration → API**.
+No manual schema creation is needed. The API health check probes `/health/ready`;
+failed migrations prevent API startup. The API is published only on
+`127.0.0.1:8000` (override `REVIEW_API_PORT` if occupied); PostgreSQL has no host
+port. Use the HTTP submission and polling instructions above. The API container
+has one Uvicorn worker, no reload, and a 90-second Docker stop grace period to
+allow the bounded application shutdown to finish.
+
+PostgreSQL data is stored in the named `review-data` volume at
+`/var/lib/postgresql` inside the PostgreSQL 18 container. Its actual volume name
+is prefixed by the Compose project name, normally `code-review-agent_review-data`.
+Keep the same project name and credentials to reuse it. These routine commands
+preserve the data:
+
+```bash
+docker compose --env-file .env.compose restart api
+docker compose --env-file .env.compose down
+docker compose --env-file .env.compose up -d --wait
+```
+
+**`down -v` deletes the database volume and its saved results.** It is not a
+routine restart or troubleshooting command. A volume preserves data across
+container recreation; it is not a backup. The isolated acceptance runner deletes
+only its own randomly named test volume after checking its ownership.
+
+For a database restart, stop API first, restart DB, then run `up -d --wait` to
+restore dependency ordering. Restarting DB alone can invalidate the executor's
+ownership connection; an unhealthy API then needs a fresh process. For an image
+upgrade, stop API, rebuild, and use `up -d --wait` so the migration gate is applied.
+Do not scale API replicas or run a second server against the same task database.
+
+Troubleshooting:
+
+- Inspect `docker compose --env-file .env.compose ps -a` and
+  `docker compose --env-file .env.compose logs --tail=100 db migrate api`.
+  Avoid sharing `docker inspect` or resolved Compose configuration: environment
+  variables there contain runtime secrets.
+- An exited migration service with code 0 is normal. A nonzero exit blocks API;
+  correct credentials/schema issues before starting it again.
+- Changing `POSTGRES_PASSWORD` in the env file does not rotate the existing
+  database role's password. Keep the original value until explicitly rotating
+  credentials in PostgreSQL; do not delete the volume to fix a login error.
+- Live health with failing readiness indicates database/schema/executor trouble.
+  A second API instance intentionally stays unready. Stop the unintended instance
+  and restart the intended process after correcting the cause.
+- Compose does not restart a container merely because its health check fails.
+  The `unless-stopped` policy handles process exits; diagnose unhealthy running
+  services rather than waiting for an automatic recovery.
+
+### Isolated, fully offline container acceptance
+
+With Docker running, this helper builds the same production image and validates
+it with a separate Compose project, random credentials, an unpublished database,
+and an internal network that blocks upstream egress during fixture execution:
+
+```bash
+python scripts/verify_compose.py
+```
+
+Use `--skip-build` only if `code-review-agent:v4.4` already matches the current
+source. The helper never reads your `.env`, `.env.compose`, or `.env.pgtest`. It
+mounts the fixed `tests/compose/compose_fixture.py` read-only for HTTP mock work;
+the production image contains no fixture/provider switch or fixture-upload API.
+On internal networks, requests use real HTTP on container loopback; no host port
+is needed for this phase. It checks fresh migration/health, saved results across API and DB restarts,
+forced termination after a file checkpoint, data retention through `down/up`,
+and a real migration failure preventing API startup. It finally uses a normal
+bridge network and random host loopback port to verify the production entrypoint
+without the fixture, only querying/replaying existing tasks. That phase performs
+no new review and requires no GitHub call. The report and redacted Docker log stay under ignored
+`reports/review-v445-test-<id>/`; generated test credentials are removed at exit.
+
+### Continuous integration
+
+`tests.yml` retains the core-only Python 3.11 job and adds two independent jobs:
+
+- Python 3.13 + a real PostgreSQL 18.6 service runs the isolated database/API
+  suite, frozen dataset validation, and 45 offline mock evaluations.
+- A Docker job builds the image and runs the same offline Compose acceptance.
+
+These jobs use read-only repository permissions, test-only database credentials,
+blank upstream keys, and no model calls or image publishing. Workflow execution
+on GitHub requires a later user-controlled push; local verification does not
+claim a hosted CI pass. The existing separate PR Review workflow is unchanged:
+it can call the paid model and publish a comment on eligible non-draft PRs when
+its secret is configured. Keep the delivery PR as a draft while only offline CI
+is authorized; marking it ready for review can trigger that workflow.
+
 ## Architecture
 
 ```text
@@ -491,6 +924,9 @@ diff_parser.py                              |
     +-------------------+--------------------+
                         |
                     FileDiff[]
+                        |
+                 review_service.py
+               prepare / configure / execute
                         |
                 review_pipeline.py
               shared budgets / validation
@@ -598,9 +1034,20 @@ Roadmap:
   progress tracing, and a classic baseline
 - V4.2 (implemented): Controlled read/search tools, revision-bound source snapshots,
   evidence validation and bounded model/tool subgraph; development cases kept locally
-- V4.3 (in progress): Twenty frozen evaluation fixtures, scoring rules, structured
-  events, and an offline runner; independent human review and a live baseline to follow
-- V4.4 (planned): Minimal API service, persisted task records, and Docker delivery
+- V4.3 (implemented): Twenty frozen evaluation fixtures, structured events, offline
+  and budgeted live runners, and adjudication-based scoring. The live baseline was
+  completed with AI-reviewed labels accepted by the user; no independent human review.
+- V4.4.1 (implemented): Shared application service, injected dependencies, and
+  typed file-completion checkpoints with fatal persistence failure handling
+- V4.4.2 (implemented): PostgreSQL schema/migrations, transactional repository,
+  and isolated real-database tests
+- V4.4.3 (implemented): Single-thread executor, session ownership lock,
+  reliable persistence sink, startup interruption, and bounded shutdown
+- V4.4.4 (implemented): HTTP task submission/query API, bearer authentication,
+  repository restrictions, immutable GitHub reads, and lifecycle integration
+- V4.4.5 (implemented): Docker/Compose, migration and health gates, persistent
+  database volume, isolated container acceptance, and offline CI jobs
+- V4.4.6 (planned): Stage acceptance and separately authorized live demonstration
 - V5 (planned): Durable queues, independent workers, recovery, and deployment scaling
 
 ## Files to commit
@@ -612,5 +1059,6 @@ depending on local experiments.
 The entire `experiments/` directory, virtual environments, Python/test caches,
 coverage output, real `.env` files and local `docs/` notes are ignored. Experiments
 record development progress and diagnostics; they are not a formal benchmark.
-Systematic quality evaluation with a separate validation set remains planned
-for V4.3. Existing tracked files are not untracked by adding an ignore rule.
+V4.3 includes a frozen development/holdout evaluation set; see the evaluation guide
+above. Historical runs and reports remain local. Existing tracked files are not
+untracked by adding an ignore rule.
