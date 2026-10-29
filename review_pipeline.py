@@ -6,6 +6,9 @@ from collections.abc import Callable
 from diff_parser import FileDiff
 from review_models import ReviewIssue, ReviewResult, SEVERITY_ORDER
 from reviewer import review_diff
+from review_checkpoint import FileCheckpoint, PersistenceGuard, ReviewRunError
+from review_events import record_event, reason_code
+from time import perf_counter
 
 
 MAX_FILES = 30
@@ -194,6 +197,8 @@ def review_files(
     max_input_chars: int | None = None,
     max_context_chars: int | None = None,
     max_tool_calls: int | None = None,
+    review_fn: Callable[[str], ReviewResult] | None = None,
+    persistence: PersistenceGuard | None = None,
 ) -> ReviewBatch:
     """Review text diffs independently and keep partial results on failure."""
 
@@ -214,7 +219,7 @@ def review_files(
         from review_graph import review_files_graph
 
         return review_files_graph(
-            file_diffs, review_fn=review_diff, max_files=max_files,
+            file_diffs, review_fn=review_fn or review_diff, max_files=max_files,
             max_file_chars=max_file_chars, max_total_chars=max_total_chars,
             on_step=on_step,
             on_record=on_record,
@@ -222,6 +227,7 @@ def review_files(
             max_model_calls=max_model_calls,
             max_input_chars=max_input_chars, max_context_chars=max_context_chars,
             max_tool_calls=max_tool_calls,
+            persistence=persistence,
         )
     if on_step is not None:
         raise ValueError("Step tracing requires the langgraph engine")
@@ -237,7 +243,24 @@ def review_files(
     reviewed = 0
 
     for file_diff in file_diffs:
+        if persistence is not None:
+            persistence.before_work()
+        started = perf_counter()
         path, diff = file_diff.path, file_diff.diff
+
+        def checkpoint(status, findings=(), diagnostic=None):
+            if persistence is not None:
+                code = reason_code(diagnostic) if diagnostic else None
+                record_event(lambda event: persistence.file_completed(FileCheckpoint(
+                    path, status, tuple(findings), code, event)),
+                    node='review_file' if status != 'skipped' else 'skip_file',
+                    path=path, started=started, outcome='ok' if status == 'reviewed' else status,
+                    reason=code or 'completed',
+                    counters={'attempted': attempted, 'reviewed': reviewed,
+                              'failures': len(failures), 'skipped': len(skipped),
+                              'used_chars': used_chars},
+                    limits={'max_files': max_files, 'max_file_chars': max_file_chars,
+                            'max_total_chars': max_total_chars})
 
         reason = get_skip_reason(
             file_diff, attempted=attempted, used_chars=used_chars,
@@ -246,14 +269,17 @@ def review_files(
         )
         if reason is not None:
             skipped.append(FileProblem(path, reason))
+            checkpoint('skipped', diagnostic=reason)
             continue
 
         attempted += 1
         used_chars += len(diff)
 
         try:
-            validated_issues = review_file_issues(file_diff, review_diff)
+            validated_issues = review_file_issues(file_diff, review_fn or review_diff)
 
+        except ReviewRunError:
+            raise
         except Exception as exc:
             failures.append(
                 FileProblem(
@@ -261,11 +287,15 @@ def review_files(
                     f"{type(exc).__name__}: {exc}",
                 )
             )
+            checkpoint('failed', diagnostic=failures[-1].reason)
             continue
 
         reviewed += 1
         issues.extend(validated_issues)
+        checkpoint('reviewed', validated_issues)
 
+    if persistence is not None:
+        persistence.check()
     return finish_review_batch(
         issues=issues, failures=failures, skipped=skipped,
         total_files=len(file_diffs), reviewed_files=reviewed,

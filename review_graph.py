@@ -10,6 +10,7 @@ from typing_extensions import TypedDict
 from diff_parser import FileDiff
 from review_models import ReviewIssue, ReviewResult
 from review_events import reason_code, record_event
+from review_checkpoint import FileCheckpoint, PersistenceGuard, ReviewRunError
 from review_pipeline import (
     FileProblem,
     ReviewBatch,
@@ -49,6 +50,7 @@ def build_review_graph(
     context_budget=None,
     on_step=None,
     on_record=None,
+    persistence: PersistenceGuard | None = None,
 ):
     """Compile a graph with an injected model boundary for offline testing."""
 
@@ -56,9 +58,17 @@ def build_review_graph(
         from review_tools import ContextBudget
         context_budget = ContextBudget()
 
+    def observe(event):
+        if persistence is not None:
+            persistence.record_event(event)
+        if on_record is not None:
+            on_record(event)
+
     def check_file(state: ReviewState) -> dict:
         if state["index"] >= len(state["files"]):
             return {"active_path": None, "skip_reason": None}
+        if persistence is not None:
+            persistence.before_work()
         file_diff = state["files"][state["index"]]
         # Scope is decided before patch/size/budget checks. Exclusions are not
         # unfinished work, even when an excluded artifact is huge or has no patch.
@@ -124,7 +134,7 @@ def build_review_graph(
                     reason = reason_code(f'{type(exc).__name__}: {exc}')
                     raise
                 finally:
-                    record_event(on_record, node='request_rejected' if request_rejected else 'model_request', path=file_diff.path,
+                    record_event(observe, node='request_rejected' if request_rejected else 'model_request', path=file_diff.path,
                         started=started, outcome='error' if reason else 'ok', reason=reason,
                         counters={'model_calls': state['attempted'] if request_rejected else update['attempted'], 'tool_calls': 0,
                                   'input_chars': None, 'context_chars': 0},
@@ -153,9 +163,11 @@ def build_review_graph(
                 issues = review_file_issues(file_diff, lambda diff: review_with_context(
                     diff, context=context, budget=context_budget,
                     request_fn=context_request_fn, on_event=on_event,
-                    on_record=(lambda event: on_record(replace(event, path=file_diff.path)))
-                              if on_record is not None else None,
+                    on_record=lambda event: observe(replace(event, path=file_diff.path)),
+                    before_work=persistence.before_work if persistence is not None else None,
                 ), verified_context=True)
+        except ReviewRunError:
+            raise
         except Exception as exc:
             from review_tools import ModelBudgetError
             if isinstance(exc, ModelBudgetError) and (context is None or context_budget.model_calls == initial_calls):
@@ -181,6 +193,8 @@ def build_review_graph(
 
     def observed(node, function):
         def run(state):
+            if persistence is not None:
+                persistence.check()
             started = perf_counter()
             update = function(state)
             merged = {**state, **update}
@@ -197,7 +211,20 @@ def build_review_graph(
             counters.update({key: len(merged.get(key, [])) for key in ('failures', 'skipped', 'excluded')})
             if context is None:
                 counters.update(model_calls=merged['attempted'], tool_calls=0, input_chars=None, context_chars=0)
-            record_event(on_record, node=node, path=merged['active_path'], started=started,
+            def completed(event):
+                if persistence is not None:
+                    persistence.check()
+                    status = 'reviewed' if outcome == 'ok' else outcome
+                    findings = tuple(merged['issues'][len(state['issues']):])
+                    persistence.file_completed(FileCheckpoint(
+                        state['active_path'], status, findings,
+                        None if status == 'reviewed' else reason, event))
+                if on_record is not None:
+                    on_record(event)
+
+            # The sink receives a completion event ONLY in the file transaction.
+            callback = completed if node in ('review_file', 'skip_file', 'exclude_file') else observe
+            record_event(callback, node=node, path=merged['active_path'], started=started,
                          outcome=outcome, reason=reason, budget=context_budget if context is not None else None,
                          counters=counters, limits={'max_files': max_files, 'max_file_chars': max_file_chars,
                                                    'max_total_chars': max_total_chars})
@@ -234,6 +261,7 @@ def review_files_graph(
     max_input_chars: int | None = None,
     max_context_chars: int | None = None,
     max_tool_calls: int | None = None,
+    persistence: PersistenceGuard | None = None,
 ) -> ReviewBatch:
     from review_tools import ContextBudget
     overrides = dict(max_model_calls=max_model_calls, max_input_chars=max_input_chars,
@@ -244,6 +272,7 @@ def review_files_graph(
         max_file_chars=max_file_chars, max_total_chars=max_total_chars,
         context=context, context_request_fn=context_request_fn,
         context_budget=context_budget, on_step=on_step, on_record=on_record,
+        persistence=persistence,
     )
     state: ReviewState = {
         "files": list(file_diffs), "index": 0, "active_path": None, "skip_reason": None,
@@ -271,4 +300,6 @@ def review_files_graph(
                     input_limit=context_budget.max_input_chars if context is not None else 0,
                     excluded=len(state.get('excluded', [])),
                 ))
+    if persistence is not None:
+        persistence.check()
     return state["batch"]

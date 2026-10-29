@@ -1,0 +1,75 @@
+name: code-review-agent
+
+x-app: &app
+  image: ${REVIEW_IMAGE:-code-review-agent:v4.4}
+  build: .
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+x-database-env: &database-env
+  POSTGRES_HOST: db
+  POSTGRES_DB: review
+  POSTGRES_USER: review
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a nonempty POSTGRES_PASSWORD}
+
+services:
+  db:
+    image: postgres:18.6@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+    environment:
+      POSTGRES_DB: review
+      POSTGRES_USER: review
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a nonempty POSTGRES_PASSWORD}
+    volumes:
+      - review-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    environment: *database-env
+    command: ["python", "-m", "review_api.container", "migrate"]
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  api:
+    <<: *app
+    environment:
+      <<: *database-env
+      REVIEW_API_TOKEN: ${REVIEW_API_TOKEN:?Set a nonempty REVIEW_API_TOKEN}
+      REVIEW_ALLOWED_REPOS: ${REVIEW_ALLOWED_REPOS:?Set REVIEW_ALLOWED_REPOS}
+      REVIEW_MODEL_MODE: ${REVIEW_MODEL_MODE:-mock}
+      REVIEW_PROFILES_JSON: ${REVIEW_PROFILES_JSON:-}
+      REVIEW_WAITING_LIMIT: ${REVIEW_WAITING_LIMIT:-8}
+      REVIEW_GITHUB_TIMEOUT: ${REVIEW_GITHUB_TIMEOUT:-10}
+      REVIEW_MODEL_TIMEOUT: ${REVIEW_MODEL_TIMEOUT:-45}
+      REVIEW_MAX_OUTPUT_TOKENS: ${REVIEW_MAX_OUTPUT_TOKENS:-16384}
+      REVIEW_SHUTDOWN_GRACE: ${REVIEW_SHUTDOWN_GRACE:-10}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    ports:
+      - "127.0.0.1:${REVIEW_API_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 90s
+    restart: unless-stopped
+
+volumes:
+  review-data:

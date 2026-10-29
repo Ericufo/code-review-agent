@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from time import perf_counter
 import warnings
 
+from review_checkpoint import ReviewRunError
+
 
 def reason_code(message: str) -> str:
     """Classify existing diagnostics without persisting arbitrary exception text."""
@@ -78,5 +80,8 @@ def record_event(callback, *, node, started, outcome="ok", reason=None,
     # source-bearing callback exceptions. The runner uses an in-memory sink.
     try:
         callback(event)
+    except ReviewRunError:
+        # Reliable persistence is a fatal execution boundary, not an observer.
+        raise
     except Exception:
         warnings.warn("Review event observer failed; observation was dropped", RuntimeWarning)
