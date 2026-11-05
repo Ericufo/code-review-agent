@@ -42,7 +42,7 @@ class ScriptedModel:
         self.scenario = scenario
         self.calls = 0
 
-    def context_request(self, inputs, instructions, *, tools_enabled=True):
+    def context_request(self, inputs, instructions, *, tools_enabled=True, tools=None):
         self.calls += 1
         data = json.loads(inputs[0]["content"])
         diff = data["git_diff"]

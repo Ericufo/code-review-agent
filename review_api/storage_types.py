@@ -4,7 +4,7 @@ import hashlib
 import json
 from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from review_events import ReviewEvent
 
@@ -40,6 +40,8 @@ class StoredConfig(StrictRecord):
     engine: Literal['langgraph'] = 'langgraph'
     context_mode: Literal['repo'] = 'repo'
     model_mode: Literal['mock', 'live'] = 'mock'
+    retrieval_mode: Literal['literal', 'vector'] = 'literal'
+    embedding_id: Annotated[str, Field(pattern=r'^[0-9a-f]{64}$')] | None = None
     max_files: Count = 30
     max_file_chars: Count = 20_000
     max_total_chars: Count = 160_000
@@ -47,6 +49,12 @@ class StoredConfig(StrictRecord):
     max_input_chars: Count = 2_000_000
     max_context_chars: Count = 256_000
     max_tool_calls: Count = 160
+
+    @model_validator(mode='after')
+    def retrieval_config(self):
+        if (self.retrieval_mode == 'vector') != (self.embedding_id is not None):
+            raise ValueError('Vector retrieval requires an embedding identity; literal mode must omit it')
+        return self
 
 
 class TaskSnapshot(StrictRecord):
@@ -67,6 +75,13 @@ def validate_path(value: str) -> str:
     return value
 
 
+class RetrievalRecord(StrictRecord):
+    index_id: str = Field(pattern=r'^[0-9a-f]{64}$')
+    index_cache_hit: Count
+    indexed_chunks: Count
+    returned_chunks: Count
+
+
 class StoredEvent(StrictRecord):
     schema_version: Literal[1]
     timestamp: AwareDatetime
@@ -80,6 +95,7 @@ class StoredEvent(StrictRecord):
     counters: dict[str, Count | None]
     limits: dict[str, Count]
     api_usage: dict[str, Count | None] | None
+    retrieval: RetrievalRecord | None = None
 
     @field_validator('path')
     @classmethod
@@ -92,7 +108,7 @@ class StoredEvent(StrictRecord):
         allowed = {
             'counters': {'attempted', 'reviewed', 'used_chars', 'failures', 'skipped', 'excluded',
                          'model_calls', 'tool_calls', 'context_chars', 'input_chars'},
-            'limits': set(StoredConfig.model_fields) - {'engine', 'context_mode', 'model_mode'},
+            'limits': {key for key in StoredConfig.model_fields if key.startswith('max_')},
             'api_usage': {'input_tokens', 'output_tokens', 'total_tokens'},
         }[info.field_name]
         if value is not None and value.keys() - allowed:

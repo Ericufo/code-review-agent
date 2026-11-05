@@ -61,9 +61,9 @@ def partial_case(case):
 
 def run_case(case, *, run_id, mode, scenario="success", model=None,
              limits=None, context_limits=None, events=None, version=None,
-             execution_kind="mock", model_name="scripted-v2", event_sink=None):
+             execution_kind="mock", model_name="scripted-v2", event_sink=None, retriever_factory=None):
     """Inject model and repository doubles while using the production graph."""
-    if mode not in ("context", "diff-only"):
+    if mode not in ("context", "diff-only", "vector"):
         raise ValueError("Unsupported review mode")
     if scenario not in ("success", *SCENARIOS):
         raise ValueError("Unsupported reliability scenario")
@@ -73,6 +73,10 @@ def run_case(case, *, run_id, mode, scenario="success", model=None,
     if scenario == "partial":
         case = partial_case(case)
     diffs, context = case.review_inputs()
+    if mode == 'vector':
+        if retriever_factory is None:
+            raise ValueError('Vector evaluation requires an explicit retriever')
+        context.retriever = retriever_factory(context)
     configured_limits = {**FILE_LIMITS, **(limits or {})}
     budget = ContextBudget(**(context_limits or {}))
     if scenario == "budget_exhausted":
@@ -106,7 +110,7 @@ def run_case(case, *, run_id, mode, scenario="success", model=None,
         "versions": context.revisions, "changed_files": case.changed_files,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "model": model_name, "code_version": version,
-        "limits": {**configured_limits, **(configured_context_limits if mode == "context" else {})},
+        "limits": {**configured_limits, **(configured_context_limits if mode != "diff-only" else {})},
         "execution_status": "failed", "status": None, "termination_reason": None,
         "total_files": len(diffs), "eligible_files": len(diffs), "reviewed_files": 0,
         "failures": [], "skipped": [], "excluded": [], "findings": [], "files": [],
@@ -116,9 +120,9 @@ def run_case(case, *, run_id, mode, scenario="success", model=None,
     }
     try:
         batch = review_files_graph(diffs, review_fn=model.diff_review, **configured_limits,
-            context=context if mode == "context" else None,
-            context_request_fn=model.context_request if mode == "context" else None,
-            on_record=collect, **(configured_context_limits if mode == "context" else {}))
+            context=context if mode != "diff-only" else None,
+            context_request_fn=model.context_request if mode != "diff-only" else None,
+            on_record=collect, **(configured_context_limits if mode != "diff-only" else {}))
     except KeyboardInterrupt:
         if execution_kind != "live":
             raise

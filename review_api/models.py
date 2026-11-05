@@ -111,6 +111,7 @@ class ReviewEventRecord(Base):
     counters: Mapped[dict] = mapped_column(JSONB, nullable=False)
     limits: Mapped[dict] = mapped_column(JSONB, nullable=False)
     api_usage: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    retrieval: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     __table_args__ = (
         CheckConstraint("seq > 0 AND schema_version = 1 AND duration_ms >= 0 AND duration_ms < 'Infinity'::float8", name='ck_event_values'),
         CheckConstraint("outcome IN ('ok','error','failed','skipped','excluded')", name='ck_event_outcome'),

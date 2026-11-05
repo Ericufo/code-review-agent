@@ -1,4 +1,5 @@
 .venv/
+.rag-models/
 __pycache__/
 .env
 docs/

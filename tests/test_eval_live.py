@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import os
+import threading
+import time
 from unittest.mock import Mock, patch
 
 from evals.live import Ledger, LiveModel, LivePlan, ROOT, main, run_live, selected_cases
@@ -26,6 +29,49 @@ def response(text=None, usage=True):
 
 
 class TestEvalLive(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'Windows file-sharing semantics')
+    def test_checkpoint_survives_a_real_reader_holding_the_target(self):
+        from evals.live import write_json
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'result.json'
+            write_json(target, {'status': 'old'})
+            errors = []
+            def writer():
+                try:
+                    write_json(target, {'status': 'new'})
+                except Exception as exc:
+                    errors.append(exc)
+            with target.open('r') as reader:
+                worker = threading.Thread(target=writer)
+                worker.start()
+                time.sleep(.15)
+                self.assertEqual(json.load(reader), {'status': 'old'})
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(json.loads(target.read_text()), {'status': 'new'})
+            self.assertFalse(target.with_suffix('.json.tmp').exists())
+
+    def test_vector_plan_requires_retriever_before_creating_or_dispatching(self):
+        p = plan(mode_order=['context', 'vector'])
+        with tempfile.TemporaryDirectory() as directory:
+            create = Mock(side_effect=AssertionError('must not dispatch'))
+            output = Path(directory) / 'run'
+            with self.assertRaises(ValueError):
+                run_live(p, output=output, create=create)
+            self.assertFalse(output.exists())
+            create.assert_not_called()
+
+    def test_vector_tool_schema_is_sent_and_counted_by_live_transport(self):
+        from review_tools import TOOL_SCHEMAS, RETRIEVE_SCHEMA
+        p = plan(mode_order=['context', 'vector'])
+        create = Mock(return_value=response())
+        model = LiveModel(p, Ledger(p, lambda event: None), create, 'vector-record')
+        schemas = TOOL_SCHEMAS + [RETRIEVE_SCHEMA]
+        model.context_request([], 'Review', tools=schemas)
+        self.assertEqual(create.call_args.kwargs['tools'], schemas)
+        self.assertGreater(model.input_chars, len(json.dumps(schemas)))
+
     def test_plan_validation_does_not_create_client_or_spend_calls(self):
         with patch("openai.OpenAI", side_effect=AssertionError("must stay offline")):
             self.assertEqual(main(["--plan", str(ROOT / "evals/live-plan.example.json")]), 0)

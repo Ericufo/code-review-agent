@@ -75,7 +75,7 @@ class ExecutorSessionLock:
             self.connection.close()
 
 
-def mock_context_request(inputs, instructions, *, tools_enabled=True):
+def mock_context_request(inputs, instructions, *, tools_enabled=True, tools=None):
     """Deterministic plumbing result, not evidence that a real PR is clean."""
     return SimpleNamespace(status='completed', output=[], usage=None,
         output_text=json.dumps({'summary': '', 'issues': [], 'context_complete': True, 'context_reason': ''}))
@@ -88,6 +88,7 @@ class GuardedContext(RepositoryContext):
         self.revisions = dict(delegate.revisions)
         self.local_root = None
         self._delegate, self._before_work = delegate, before_work
+        self.retriever = getattr(delegate, 'retriever', None)
 
     def paths(self, version):
         self._before_work()

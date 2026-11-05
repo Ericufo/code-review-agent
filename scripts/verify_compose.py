@@ -24,7 +24,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--skip-build', action='store_true', help='Use an already built current image')
     parser.add_argument('--image', default='code-review-agent:v4.4')
+    parser.add_argument('--rag', action='store_true', help='Verify the optional RAG image/overlay with local model files')
     args = parser.parse_args()
+    if args.rag:
+        args.image = 'code-review-agent:v4.5-rag'
+    profiles = ({'default': {'retrieval_mode': 'vector',
+        'embedding_id': '2bfc137cfc417a231dd502a4b84a511043cd8101c7ce9b282c0e8ba6544578f9'}} if args.rag else {})
     project = 'review-v445-test-' + uuid4().hex[:12]
     assert re.fullmatch(r'review-v445-test-[0-9a-f]{12}', project)
     directory = ROOT / 'reports' / project
@@ -33,7 +38,7 @@ def main():
     env_file = directory / '.env.test'
     env_file.write_text(f'POSTGRES_PASSWORD={password}\nREVIEW_API_TOKEN={token}\n'
         f'REVIEW_IMAGE={args.image}\nREVIEW_ALLOWED_REPOS=test/repo\nREVIEW_API_PORT=0\n'
-        'REVIEW_MODEL_MODE=mock\nREVIEW_PROFILES_JSON={}\nGITHUB_TOKEN=\nDEEPSEEK_API_KEY=\n', encoding='utf-8')
+        'REVIEW_MODEL_MODE=mock\nREVIEW_PROFILES_JSON=' + json.dumps(profiles) + '\nGITHUB_TOKEN=\nDEEPSEEK_API_KEY=\n', encoding='utf-8')
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(('COMPOSE_', 'REVIEW_', 'POSTGRES_'))
            and key not in {'DATABASE_URL', 'GITHUB_TOKEN', 'DEEPSEEK_API_KEY'}}
@@ -69,7 +74,10 @@ def main():
         return result
 
     def compose(*arguments, extra=None, normal=False, **kwargs):
-        files = ['-f', str(ROOT / 'compose.yaml'), '-f', str(normal_override if normal else override)]
+        files = ['-f', str(ROOT / 'compose.yaml')]
+        if args.rag:
+            files += ['-f', str(ROOT / 'compose.rag.yaml')]
+        files += ['-f', str(normal_override if normal else override)]
         if extra is not None:
             files += ['-f', str(extra)]
         return run('compose', '--project-name', project, '--env-file', str(env_file), *files, *arguments, **kwargs)
@@ -143,7 +151,7 @@ with urlopen(request, timeout=5) as response:
         assert config['networks']['default']['internal'] is True
         assert config['services']['api']['environment']['REVIEW_MODEL_MODE'] == 'mock'
         assert not config['services']['api']['environment']['DEEPSEEK_API_KEY']
-        assert json.loads(config['services']['api']['environment']['REVIEW_PROFILES_JSON']) == {}
+        assert json.loads(config['services']['api']['environment']['REVIEW_PROFILES_JSON']) == profiles
         check('resolved configuration: private DB, loopback API, migration gate, mock and no egress')
         sources = [*ROOT.glob('*.py'), *(ROOT / 'review_api').glob('*.py'),
                    *(ROOT / 'migrations').rglob('*.py'), ROOT / 'alembic.ini',
@@ -178,6 +186,10 @@ print('image filesystem and non-root audit passed')
         saved = wait_result(task_id, lambda value: value['execution_status'] == 'finished')
         assert saved['review_status'] == 'COMPLETE' and len(saved['files']) == 1
         check('container HTTP submission and persisted mock result')
+        if args.rag:
+            _, events = http(f'/api/v1/reviews/{task_id}/events')
+            assert any(e['node'] == 'retrieve_code' and e['retrieval']['returned_chunks'] > 0 for e in events['items'])
+            check('real offline model and pgvector retrieval persist through the API')
         compose('restart', 'api')
         up()
         assert wait_result(task_id, lambda value: not value['partial']) == saved
