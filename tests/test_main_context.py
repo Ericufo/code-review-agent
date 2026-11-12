@@ -1,5 +1,6 @@
 import contextlib
 import io
+import sys
 import unittest
 from unittest.mock import Mock, patch
 
@@ -12,6 +13,17 @@ from review_pipeline import ReviewBatch
 
 
 class TestMainContext(unittest.TestCase):
+    def test_empty_vector_review_needs_no_optional_dependencies_or_configuration(self):
+        context = Mock(revisions={'head': 'workspace:test'})
+        with patch('main.load_dotenv'), \
+             patch('review_service.capture_local_context', return_value=context), \
+             patch('review_service.get_local_files', return_value=[]), \
+             patch.dict(sys.modules, {'repository_rag': None}), \
+             patch('rag_embedding.LocalEmbedder.__init__', side_effect=AssertionError('must not load model')):
+            code, output = self.run_cli('--context', 'repo', '--retrieval', 'vector')
+        self.assertEqual(code, 0)
+        self.assertEqual(output.strip(), 'No changes to review.')
+
     def run_cli(self, *args):
         output = io.StringIO()
         with patch('sys.argv', ['main.py', *args]), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):

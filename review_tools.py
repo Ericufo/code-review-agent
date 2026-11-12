@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from repository_context import ContextError, RepositoryContext, validate_path
+from repository_context import ContextError, RepositoryContext, validate_path, source_lines
 from review_models import ContextEvidence
 
 
@@ -43,6 +43,18 @@ class SearchCodeArgs(BaseModel):
 
 
 ARGUMENT_MODELS = {'read_file': ReadFileArgs, 'search_code': SearchCodeArgs}
+
+
+class RetrieveCodeArgs(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    query: str = Field(min_length=1, max_length=512)
+    version: Literal['head', 'base'] = 'head'
+    top_k: int = Field(default=5, ge=1, le=10)
+
+
+RETRIEVE_SCHEMA = {'type': 'function', 'name': 'retrieve_code',
+    'parameters': RetrieveCodeArgs.model_json_schema(),
+    'description': 'Find semantically related Python code at one pinned version. Use a short description or symbol. Returns at most top_k candidates, not exhaustive results. Similarity is not defect evidence. Read returned code; use read_file for adjacent lines. Other languages use search_code.'}
 TOOL_SCHEMAS = [
     {'type': 'function', 'name': name, 'parameters': model.model_json_schema(),
      'description': description}
@@ -97,6 +109,9 @@ class ToolSession:
         self.deadline = clock() + timeout
         self.seen = set()
         self.evidence = []
+        self.retriever = getattr(context, 'retriever', None)
+        self.schemas = TOOL_SCHEMAS + ([RETRIEVE_SCHEMA] if self.retriever is not None else [])
+        self.argument_models = {**ARGUMENT_MODELS, **({'retrieve_code': RetrieveCodeArgs} if self.retriever else {})}
 
     def check_time(self):
         if self.clock() >= self.deadline:
@@ -110,16 +125,16 @@ class ToolSession:
             raise ContextError(f'Tool call budget exhausted (batch): used={self.budget.tool_calls}, limit={self.budget.max_tool_calls}')
         self.calls += 1
         self.budget.tool_calls += 1
-        if name not in ARGUMENT_MODELS or len(arguments) > 4096:
+        if name not in self.argument_models or len(arguments) > 4096:
             raise ContextError('Unknown tool or oversized arguments')
         # Error messages returned to the model must not echo untrusted argument values.
         try:
-            args = ARGUMENT_MODELS[name].model_validate_json(arguments)
+            args = self.argument_models[name].model_validate_json(arguments)
         except ContextError as exc:
             # Our path/range validators contain fixed messages, never argument values.
             raise ContextError(f'Invalid tool arguments: {exc}') from exc
         except ValidationError as exc:
-            fields = ARGUMENT_MODELS[name].model_fields
+            fields = self.argument_models[name].model_fields
             details = '; '.join(
                 f"{error['loc'][0] if error['loc'] and error['loc'][0] in fields else 'arguments'}: {error['type']}"
                 for error in exc.errors(include_input=False, include_url=False)[:5]
@@ -160,7 +175,7 @@ class ToolSession:
                 f'{line}: {text}' for line, text in zip(range(start, end + 1), lines))}
 
         if name == 'read_file':
-            lines = self.context.read(args.path, args.version).splitlines()
+            lines = source_lines(self.context.read(args.path, args.version))
             payload_data['total_lines'] = len(lines)
             if not lines and args.start_line == 1:
                 pass  # Empty file: successful read, no citable lines.
@@ -177,12 +192,26 @@ class ToolSession:
                     raise page_too_small('source line')
                 if end < requested_end:
                     payload_data.update(has_more=True, next_start_line=end + 1)
+        elif name == 'retrieve_code':
+            if result_limit < 256:
+                raise page_too_small('retrieval result')
+            hits, more, index_id, stats = self.retriever.search(
+                args.query, args.version, args.top_k, self.check_time)
+            payload_data.update(index_id=index_id, retrieval_stats=stats, has_more=more)
+            for chunk, source in hits:
+                entries.append(entry(chunk.path, chunk.start_line, chunk.end_line, source_lines(source)))
+                if not fits():
+                    entries.pop()
+                    if not entries:
+                        raise page_too_small('retrieval chunk')
+                    payload_data['has_more'] = True
+                    break
         else:
             paths = [args.path] if args.path is not None else self.context.paths(args.version)
             matched = 0
             for path in paths:
                 self.check_time()
-                lines = self.context.read(path, args.version).splitlines()
+                lines = source_lines(self.context.read(path, args.version))
                 for number, line in enumerate(lines, 1):
                     if args.query in line:
                         matched += 1

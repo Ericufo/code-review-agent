@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import io
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -20,6 +21,11 @@ BLOCKED_PARTS = {'.git', '.env', '.aws', '.ssh', '.venv', 'node_modules', 'vendo
 
 class ContextError(RuntimeError):
     pass
+
+
+def source_lines(source: str) -> list[str]:
+    """Physical source lines, matching AST/Git rather than Unicode separators."""
+    return [line.rstrip('\r\n') for line in io.StringIO(source, newline='')]
 
 
 def validate_path(path: str) -> str:

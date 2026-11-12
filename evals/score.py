@@ -57,7 +57,10 @@ def score(artifact, annotations, *, allow_mock=False):
             raise ValueError("Run does not match the frozen dataset")
     rows = [r for r in artifact["results"] if r["suite"] == "cases"]
     by_record = unique(rows, "record_id")
-    expected = {f"{cid}/{mode}/success" for cid in selection for mode in ("diff-only", "context")}
+    modes = manifest.get('plan', {}).get('mode_order', ['diff-only', 'context'])
+    if len(modes) != 2 or set(modes) not in ({'diff-only', 'context'}, {'context', 'vector'}):
+        raise ValueError('Invalid comparison modes')
+    expected = {f"{cid}/{mode}/success" for cid in selection for mode in modes}
     if set(by_record) != expected:
         raise ValueError("Missing or unexpected scheduled records")
     marks = unique([Adjudication.model_validate(a) for a in annotations], "record_id")
@@ -67,7 +70,7 @@ def score(artifact, annotations, *, allow_mock=False):
     for rid, row in by_record.items():
         case = cases[row["case_id"]]
         mark = marks[rid]
-        if rid != f"{case.case_id}/{row['mode']}/success" or row["mode"] not in ("diff-only", "context"):
+        if rid != f"{case.case_id}/{row['mode']}/success" or row["mode"] not in modes:
             raise ValueError("Invalid record identity")
         for key, value in (("run_id", manifest["run_id"]), ("case_id", case.case_id), ("case_hash", case.case_hash)):
             if row[key] != value or getattr(mark, key) != value:
@@ -131,7 +134,7 @@ def score(artifact, annotations, *, allow_mock=False):
                     matched.add(item.defect_id)
                 elif item.defect_id is not None:
                     raise ValueError("FP cannot claim a gold match")
-                if row["mode"] == "context" and item.evidence_valid is None:
+                if row["mode"] in ('context', 'vector') and item.evidence_valid is None:
                     raise ValueError("Context findings require evidence adjudication")
             if row["mode"] == "diff-only" and item.evidence_valid is not None:
                 raise ValueError("Diff-only citation metric must be N/A")

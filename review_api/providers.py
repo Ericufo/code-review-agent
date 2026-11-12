@@ -63,8 +63,9 @@ class ReadOnlyGitHub:
 
 
 class GitHubProvider:
-    def __init__(self, settings):
+    def __init__(self, settings, *, rag_engine=None):
         self.settings = settings
+        self.rag_engine, self.embedder = rag_engine, None
 
     def metadata(self, request):
         return get_review_revision(ReadOnlyGitHub(request.owner, request.repo, self.settings), request.pr_number)
@@ -89,6 +90,17 @@ class GitHubProvider:
             paths.add(path)
         config = ReviewConfig(**StoredConfig.model_validate(task['config']).model_dump(exclude={'model_mode'}))
         context = GitHubRepositoryContext(client, revision) if files else None
+        if context is not None and config.retrieval_mode == 'vector':
+            from rag_embedding import LocalEmbedder
+            from repository_rag import RepositoryRetriever, VectorStore
+            if self.rag_engine is None:
+                raise ValueError('Vector storage is unavailable')
+            if self.embedder is None:
+                self.embedder = LocalEmbedder(self.settings.rag_model_dir)
+            if self.embedder.spec.key != config.embedding_id:
+                raise ValueError('Embedding configuration changed')
+            context.retriever = RepositoryRetriever(context, self.embedder, VectorStore(self.rag_engine),
+                                                    before_work=before_work)
         return PreparedReview(tuple(github_files_to_diff(files)), config, context, revision, len(files))
 
 
@@ -98,9 +110,9 @@ class LiveModelTransport:
             raise ValueError('Live model mode must be explicitly enabled')
         self.settings = settings
 
-    def __call__(self, inputs, instructions, *, tools_enabled=True):
+    def __call__(self, inputs, instructions, *, tools_enabled=True, tools=None):
         with OpenAI(api_key=self.settings.model_key.get_secret_value(), base_url='https://api.deepseek.com',
                     timeout=self.settings.model_timeout, max_retries=0) as client:
             return client.responses.create(model='deepseek-flash', instructions=instructions, input=inputs,
-                tools=TOOL_SCHEMAS if tools_enabled else [], max_output_tokens=self.settings.max_output_tokens,
+                tools=(TOOL_SCHEMAS if tools is None else tools) if tools_enabled else [], max_output_tokens=self.settings.max_output_tokens,
                 reasoning={'effort': 'low'}, text={'format': {'type': 'json_object'}})

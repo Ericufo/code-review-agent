@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import platform
 from time import perf_counter
+import time
 from typing import Literal
 from uuid import uuid4
 
@@ -37,7 +38,7 @@ class LivePlan(BaseModel):
     dataset_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     split: Literal["dev", "holdout"] = "dev"
     case_ids: list[str] = Field(default_factory=list)
-    mode_order: list[Literal["diff-only", "context"]] = Field(default_factory=lambda: ["diff-only", "context"])
+    mode_order: list[Literal["diff-only", "context", "vector"]] = Field(default_factory=lambda: ["diff-only", "context"])
     holdout_config_frozen: bool = False
     annotation_review: Literal["ai_reviewed_user_accepted"] = "ai_reviewed_user_accepted"
     max_run_calls: int = Field(strict=True, gt=0, le=1000)
@@ -61,7 +62,7 @@ class LivePlan(BaseModel):
     def consistent(self):
         if len(set(self.case_ids)) != len(self.case_ids):
             raise ValueError("Duplicate case IDs")
-        if len(self.mode_order) != 2 or set(self.mode_order) != {"diff-only", "context"}:
+        if len(self.mode_order) != 2 or set(self.mode_order) not in ({"diff-only", "context"}, {"context", "vector"}):
             raise ValueError("Mode order must contain both comparison modes exactly once")
         if self.split == "holdout" and not self.holdout_config_frozen:
             raise ValueError("Holdout requires a frozen configuration")
@@ -141,12 +142,12 @@ class LiveModel:
         self.requests = []
         self.input_chars = 0
 
-    def context_request(self, inputs, instructions, *, tools_enabled=True):
-        return self.request(inputs, instructions, tools_enabled=tools_enabled)
+    def context_request(self, inputs, instructions, *, tools_enabled=True, tools=None):
+        return self.request(inputs, instructions, tools_enabled=tools_enabled, tools=tools)
 
-    def request(self, inputs, instructions, *, tools_enabled):
+    def request(self, inputs, instructions, *, tools_enabled, tools=None):
         payload = {"model": self.plan.model, "input": inputs, "instructions": instructions,
-                   "tools": TOOL_SCHEMAS if tools_enabled else [],
+                   "tools": (TOOL_SCHEMAS if tools is None else tools) if tools_enabled else [],
                    "max_output_tokens": self.plan.max_output_tokens,
                    "reasoning": {"effort": self.plan.reasoning_effort},
                    "text": {"format": {"type": "json_object"}}}
@@ -243,7 +244,16 @@ class LiveModel:
 def write_json(path, data):
     staging = path.with_suffix(path.suffix + ".tmp")
     staging.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    staging.replace(path)
+    # Windows readers/antivirus may temporarily deny delete-sharing on the target.
+    # Retry only the atomic rename, never transport dispatch or the experiment.
+    for attempt in range(20):
+        try:
+            staging.replace(path)
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(.05)
 
 
 def pending_result(case, mode, run_id, version, plan):
@@ -261,9 +271,11 @@ def pending_result(case, mode, run_id, version, plan):
             "adjudication_status": "pending"}
 
 
-def run_live(plan, *, output, create):
+def run_live(plan, *, output, create, retriever_factory=None, retrieval_config=None):
     """Injected transport for tests. CLI is the sole credential-bearing entry."""
     cases = selected_cases(plan)
+    if 'vector' in plan.mode_order and (retriever_factory is None or retrieval_config is None):
+        raise ValueError('Vector runs require an explicit retriever and frozen configuration')
     version, run_id = code_version(), str(uuid4())
     manifest = {"schema_version": 1, "rubric_version": 1, "run_id": run_id,
                 "execution_kind": "live", "suite": "cases", "status": "running",
@@ -282,7 +294,9 @@ def run_live(plan, *, output, create):
     shared = {key: value for key, value in plan.model_dump(mode="json").items()
               if key in ("model", "base_url", "mode_order", "max_case_calls", "max_input_chars", "max_tool_calls",
                          "max_context_chars", "max_output_tokens", "timeout_seconds", "reasoning_effort")}
-    manifest["comparison_config_hash"] = fingerprint({"settings": shared, "prompt_version": manifest["prompt_version"]})
+    manifest['retrieval_config'] = retrieval_config
+    manifest["comparison_config_hash"] = fingerprint({"settings": shared, "prompt_version": manifest["prompt_version"],
+                                                     'retrieval': retrieval_config})
     output.mkdir(parents=True, exist_ok=False)
     sequence = 0
 
@@ -324,7 +338,7 @@ def run_live(plan, *, output, create):
             model = LiveModel(plan, ledger, create, rows[index]["record_id"])
             rows[index] = run_case(case, run_id=run_id, mode=mode, model=model,
                 limits=FILE_LIMITS, context_limits=plan.context_limits(), version=version,
-                execution_kind="live", model_name=plan.model, event_sink=sink)
+                execution_kind="live", model_name=plan.model, event_sink=sink, retriever_factory=retriever_factory)
             if rows[index]["execution_status"] == "interrupted":
                 ledger.stop_reason = "interrupted"
             checkpoint()
@@ -368,12 +382,36 @@ def main(argv=None):
     if not key:
         parser.exit(2, "DEEPSEEK_API_KEY is not set; no request was sent.\n")
     output = args.output or ROOT / "evals" / "runs" / str(uuid4())
+    engine, factory, retrieval_config = None, None, None
     try:
+        if 'vector' in plan.mode_order:
+            # Optional dependencies and database/model setup have their own error
+            # boundary; do not hide errors from the subsequent evaluation run.
+            try:
+                database_url = os.environ['REVIEW_RAG_DATABASE_URL']
+                from dataclasses import asdict
+                from rag_embedding import LocalEmbedder, DEFAULT_MODEL_DIR
+                from repository_rag import RepositoryRetriever, VectorStore, RAG_CHUNKS
+                from review_api.db import create_database_engine
+                embedder = LocalEmbedder(os.getenv('REVIEW_RAG_MODEL_DIR') or DEFAULT_MODEL_DIR)
+                engine = create_database_engine(database_url)
+                store = VectorStore(engine)
+                store.initialize()
+                factory = lambda context: RepositoryRetriever(context, embedder, store)
+                retrieval_config = {'embedding': asdict(embedder.spec), 'chunks': asdict(RAG_CHUNKS),
+                    'chunker': RAG_CHUNKS.version, 'source_hash': code_version()['source_hash']}
+            except Exception:
+                parser.exit(2, 'RAG initialization failed; check optional dependencies, model files and '
+                            'REVIEW_RAG_DATABASE_URL. No generation request was sent.\n')
         from openai import OpenAI
         with OpenAI(api_key=key, base_url=plan.base_url, timeout=plan.timeout_seconds, max_retries=0) as client:
-            artifact = run_live(plan, output=output, create=client.responses.create)
-    except (OSError, ValueError):
-        parser.exit(2, "Cannot create/write the run directory; use a new writable output path.\n")
+            artifact = run_live(plan, output=output, create=client.responses.create,
+                                retriever_factory=factory, retrieval_config=retrieval_config)
+    except (OSError, ValueError) as exc:
+        parser.exit(2, f"Evaluation setup or checkpoint failed ({type(exc).__name__}, errno={getattr(exc, 'errno', None)}); inspect saved artifacts.\n")
+    finally:
+        if engine is not None:
+            engine.dispose()
     print(json.dumps({"run_id": artifact["manifest"]["run_id"], "execution_kind": "live",
                       "status": artifact["manifest"]["status"], "output": str(output.resolve()),
                       "resources": artifact["manifest"]["resources"]}, indent=2))

@@ -1,9 +1,16 @@
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 import json
+import contextlib
+import io
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 import tempfile
 import unittest
+import os
+import threading
+import time
 from unittest.mock import Mock, patch
 
 from evals.live import Ledger, LiveModel, LivePlan, ROOT, main, run_live, selected_cases
@@ -26,6 +33,83 @@ def response(text=None, usage=True):
 
 
 class TestEvalLive(unittest.TestCase):
+    def test_vector_setup_failures_exit_cleanly_before_generation(self):
+        from repository_context import ContextError
+        for failure in ('configuration', 'dependency', 'model', 'database'):
+            with self.subTest(failure=failure):
+                engine = Mock()
+                store = Mock()
+                modules = {
+                    'repository_rag': SimpleNamespace(RepositoryRetriever=Mock(),
+                        VectorStore=store, RAG_CHUNKS=Mock()),
+                    'review_api.db': SimpleNamespace(create_database_engine=Mock(return_value=engine)),
+                }
+                env = {'DEEPSEEK_API_KEY': 'offline-test-key'}
+                if failure != 'configuration':
+                    env['REVIEW_RAG_DATABASE_URL'] = 'postgresql+psycopg://test:secret@localhost/test'
+                if failure == 'dependency':
+                    modules['repository_rag'] = None
+                if failure == 'database':
+                    store.return_value.initialize.side_effect = RuntimeError('secret database details')
+                stderr = io.StringIO()
+                with patch.dict(os.environ, env, clear=True), patch.dict(sys.modules, modules), \
+                     patch.object(Path, 'read_text', return_value=plan(mode_order=['context', 'vector']).model_dump_json()), \
+                     patch('evals.live.selected_cases', return_value=[]), \
+                     patch('rag_embedding.LocalEmbedder.__init__', return_value=None,
+                         side_effect=ContextError('secret model details') if failure == 'model' else None), \
+                     patch('openai.OpenAI') as client, contextlib.redirect_stderr(stderr), \
+                     self.assertRaises(SystemExit) as raised:
+                    main(['--plan', 'unused.json', '--live'])
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn('RAG initialization failed', stderr.getvalue())
+                self.assertNotIn('secret', stderr.getvalue())
+                client.assert_not_called()
+                if failure == 'database':
+                    engine.dispose.assert_called_once()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows file-sharing semantics')
+    def test_checkpoint_survives_a_real_reader_holding_the_target(self):
+        from evals.live import write_json
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'result.json'
+            write_json(target, {'status': 'old'})
+            errors = []
+            def writer():
+                try:
+                    write_json(target, {'status': 'new'})
+                except Exception as exc:
+                    errors.append(exc)
+            with target.open('r') as reader:
+                worker = threading.Thread(target=writer)
+                worker.start()
+                time.sleep(.15)
+                self.assertEqual(json.load(reader), {'status': 'old'})
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(json.loads(target.read_text()), {'status': 'new'})
+            self.assertFalse(target.with_suffix('.json.tmp').exists())
+
+    def test_vector_plan_requires_retriever_before_creating_or_dispatching(self):
+        p = plan(mode_order=['context', 'vector'])
+        with tempfile.TemporaryDirectory() as directory:
+            create = Mock(side_effect=AssertionError('must not dispatch'))
+            output = Path(directory) / 'run'
+            with self.assertRaises(ValueError):
+                run_live(p, output=output, create=create)
+            self.assertFalse(output.exists())
+            create.assert_not_called()
+
+    def test_vector_tool_schema_is_sent_and_counted_by_live_transport(self):
+        from review_tools import TOOL_SCHEMAS, RETRIEVE_SCHEMA
+        p = plan(mode_order=['context', 'vector'])
+        create = Mock(return_value=response())
+        model = LiveModel(p, Ledger(p, lambda event: None), create, 'vector-record')
+        schemas = TOOL_SCHEMAS + [RETRIEVE_SCHEMA]
+        model.context_request([], 'Review', tools=schemas)
+        self.assertEqual(create.call_args.kwargs['tools'], schemas)
+        self.assertGreater(model.input_chars, len(json.dumps(schemas)))
+
     def test_plan_validation_does_not_create_client_or_spend_calls(self):
         with patch("openai.OpenAI", side_effect=AssertionError("must stay offline")):
             self.assertEqual(main(["--plan", str(ROOT / "evals/live-plan.example.json")]), 0)

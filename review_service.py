@@ -25,6 +25,8 @@ CONTEXT_BUDGET_OPTIONS = ('max_model_calls', 'max_input_chars', 'max_context_cha
 class ReviewConfig:
     engine: str = 'langgraph'
     context_mode: str = 'diff'
+    retrieval_mode: str = 'literal'
+    embedding_id: str | None = None
     max_files: int = MAX_FILES
     max_file_chars: int = MAX_FILE_CHARS
     max_total_chars: int = MAX_TOTAL_CHARS
@@ -34,6 +36,12 @@ class ReviewConfig:
     max_tool_calls: int | None = None
 
     def __post_init__(self):
+        if self.retrieval_mode not in ('literal', 'vector'):
+            raise ValueError('Unknown retrieval mode')
+        if self.retrieval_mode == 'vector' and (self.context_mode != 'repo' or not self.embedding_id):
+            raise ValueError('Vector retrieval requires repository context and an embedding identity')
+        if self.retrieval_mode == 'literal' and self.embedding_id is not None:
+            raise ValueError('Embedding identity requires vector retrieval')
         if self.engine not in ('classic', 'langgraph') or self.context_mode not in ('diff', 'repo'):
             raise ValueError('Unknown review engine or context mode')
         if self.context_mode == 'repo' and self.engine != 'langgraph':
@@ -136,6 +144,10 @@ def execute_review(prepared: PreparedReview, *, review_fn=None, context_request_
     persistence failures abort the run and prevent finalization.
     """
     config, context = prepared.config, prepared.context
+    if config.retrieval_mode == 'vector' and context is not None:
+        retriever = getattr(context, 'retriever', None)
+        if retriever is None or retriever.embedder.spec.key != config.embedding_id:
+            raise ValueError('Configured vector retriever is unavailable or changed')
     if config.context_mode == 'repo' and prepared.files and context is None:
         raise ValueError('Repository context is required for nonempty repo reviews')
     if config.context_mode == 'diff' and context is not None:

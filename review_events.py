@@ -58,10 +58,11 @@ class ReviewEvent:
     counters: dict
     limits: dict
     api_usage: dict | None = None
+    retrieval: dict | None = None
 
 
 def record_event(callback, *, node, started, outcome="ok", reason=None,
-                 path=None, budget=None, counters=None, limits=None, usage=None):
+                 path=None, budget=None, counters=None, limits=None, usage=None, retrieval=None):
     if callback is None:
         return
     counts, caps = {}, {}
@@ -74,7 +75,7 @@ def record_event(callback, *, node, started, outcome="ok", reason=None,
         schema_version=1, timestamp=datetime.now(timezone.utc).isoformat(),
         node=node, path=path, duration_ms=max(0.0, (perf_counter() - started) * 1000),
         outcome=outcome, termination_reason=reason,
-        counters=counts, limits=caps, api_usage=usage,
+        counters=counts, limits=caps, api_usage=usage, retrieval=retrieval,
     )
     # Observers must not turn a successful review into a failed file or expose
     # source-bearing callback exceptions. The runner uses an in-memory sink.

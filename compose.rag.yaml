@@ -1,0 +1,22 @@
+# Opt-in overlay. Use a separate project name for the first RAG deployment.
+services:
+  db:
+    image: pgvector/pgvector:0.8.7-pg18-trixie@sha256:9d9c930220cb9bf2f956d10a8f909cf9973d9672ca0278aef2c1e6facccad2e0
+  migrate:
+    image: code-review-agent:v4.5-rag
+    build:
+      context: .
+      dockerfile: Dockerfile.rag
+    command: ["python", "-m", "review_api.container", "migrate-rag"]
+  api:
+    image: code-review-agent:v4.5-rag
+    build:
+      context: .
+      dockerfile: Dockerfile.rag
+    environment:
+      REVIEW_RAG_MODEL_DIR: /models
+    volumes:
+      - type: bind
+        source: ./.rag-models/minilm
+        target: /models
+        read_only: true

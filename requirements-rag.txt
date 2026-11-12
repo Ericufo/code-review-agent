@@ -1,0 +1,6 @@
+-r requirements-api.txt
+
+# Optional CPU-only embedding runtime. No torch/CUDA dependency.
+onnxruntime==1.31.1
+tokenizers==0.23.3
+numpy==2.5.4

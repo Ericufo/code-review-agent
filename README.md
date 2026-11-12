@@ -1,10 +1,15 @@
 # Code Review Agent
 
-A Python tool that reviews local Git changes and GitHub pull requests with an
-LLM. V4.2 adds opt-in, bounded repository tools to V4.1's LangGraph workflow.
-Models can read source lines and search code at a pinned revision; findings cite
-validated context evidence. The local CLI defaults to diff-only; the PR Review
-workflow explicitly enables repository context.
+A Python tool for LLM-assisted review of local Git changes and GitHub pull requests.
+It provides a bounded LangGraph workflow, revision-pinned repository context,
+frozen evaluation fixtures, a FastAPI task API with PostgreSQL persistence, and
+optional local vector retrieval. Findings cite validated context evidence when
+repository tools are enabled. The local CLI defaults to diff-only; the PR Review
+workflow enables repository context. Vector retrieval remains opt-in.
+
+Quick links: [Setup](#setup-and-manual-use) · [PR reviews](#automatic-pr-reviews) ·
+[HTTP API](#http-task-api-v444) · [Local RAG](#v45-optional-local-code-retrieval) ·
+[Validation](#validation) · [Architecture](#architecture).
 
 ## Features
 
@@ -22,6 +27,168 @@ workflow explicitly enables repository context.
 - Enables read-only `read_file` / `search_code` with `--context repo`
 - Pins PR tools to head/base Git objects and local tools to an in-memory snapshot
 - Checks evidence against actual tool results and treats tool errors as incomplete
+
+## V4.5 optional local code retrieval
+
+`repository_chunks.py` builds immutable Python source manifests from the existing
+pinned `RepositoryContext`. It preserves exact source text and physical line ranges,
+splits functions/classes with bounded fallback blocks, and binds chunk identities to
+repository, head/base, revision, source hashes and chunker configuration. Candidate
+reads recheck the source instead of trusting cached text. Empty files are recorded;
+oversized lines and denied reads fail explicitly. Other languages retain literal tools.
+
+Vector retrieval is opt-in. `retrieve_code` uses the same tool-call, elapsed-time,
+output-character and evidence checks as the literal tools. Candidates are re-read
+from the pinned source before entering `ToolSession` evidence. Errors still make
+the review incomplete; similarity is never evidence that a defect exists. The
+default literal CLI/API path needs no embedding dependencies.
+
+The initial CPU model is [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2),
+384 dimensions, Apache-2.0, pinned to commit
+`1110a243fdf4706b3f48f1d95db1a4f5529b4d41`. The ONNX model (about 90 MB) and
+tokenizer have pinned SHA-256 checksums. No Torch, GPU, embedding API key or
+runtime download is required. This English sentence model is a small engineering
+baseline, not a code-specialist quality claim. Inputs longer than 254 content tokens
+use explicit windows, length-weighted mean pooling and L2 normalization, rather
+than silently truncating source. The preprocessing policy is part of the identity.
+
+### Local setup
+
+Install the optional dependencies and explicitly download the model once:
+
+```bash
+python -m pip install -r requirements-rag.txt
+python scripts/download_embedding.py
+```
+
+Model files stay under ignored `.rag-models/minilm/`; runtime loads only those
+verified files. `REVIEW_RAG_MODEL_DIR` can select another directory containing the
+same pinned files. Changing the model requires an adapter implementing
+`EmbeddingSpec` and `embed(texts) -> list[list[float]]`. Local libraries and cloud
+HTTP APIs need different adapters. Changing model, revision, dimension or
+preprocessing produces a new index identity and requires a full rebuild, including
+when the new vectors happen to have the same dimension. Old indexes are not queried
+or deleted automatically. This version ships only the local adapter.
+
+Use a dedicated PostgreSQL database with pgvector installed. Set
+`REVIEW_RAG_DATABASE_URL` to its `postgresql+psycopg://...` URL, then initialize
+explicitly (this script does not load `.env`):
+
+```bash
+python scripts/init_rag.py
+python main.py --context repo --retrieval vector --trace
+```
+
+`main.py` loads the chosen local `.env` as before. Generation still uses the existing
+DeepSeek API and can incur charges; local embeddings do not make generation free.
+For PR review, use `--no-publish` when only analysis is intended.
+
+Indexes are exact pgvector cosine searches, filtered by immutable manifest ID,
+with deterministic tie ordering. A manifest includes all Python files, including
+empty files, plus repository, head/base, revision, content hashes, chunking and
+embedding identities. The first request builds the selected version in full;
+transactional publication makes only complete indexes visible. There is no ANN
+index, incremental mutation or automatic retry. Defaults cap builds at 4,000
+chunks/120 seconds, chunks at 40 lines/1,200 characters, queries at 512 characters
+and candidates at 10. Top-k is not exhaustive search; `has_more` is explicit.
+Only selected chunks fit into the remaining tool output budget, and only returned
+chunks become citable. Index build time is included in the retrieval event and
+per-file deadline; subsequent usage can reuse a saved index.
+
+### HTTP and Docker
+
+The existing POST body stays unchanged. A server-owned budget profile enables
+retrieval and freezes the embedding identity:
+
+```json
+{"rag":{"retrieval_mode":"vector","embedding_id":"2bfc137cfc417a231dd502a4b84a511043cd8101c7ce9b282c0e8ba6544578f9"}}
+```
+
+Set that JSON as `REVIEW_PROFILES_JSON`, set `REVIEW_RAG_MODEL_DIR`, and submit
+`"profile":"rag"`. The API stores vectors in its task database, so initialize
+pgvector tables there before using this profile. Run `alembic upgrade head` for
+the additive retrieval-event column, even when retaining literal mode. Saved
+task config includes the embedding identity; successful retrieval events record
+index ID, cache hit, indexed/returned counts and elapsed time, without query/source
+text. Index rows retain source chunks under the database's existing access policy.
+
+For an opt-in Docker deployment, prepare a separate secret env file and use a
+separate Compose project for initial testing; do not point an untested image at an
+existing production volume. After the explicit model download:
+
+```bash
+docker compose -p review-rag-demo --env-file .env.rag -f compose.yaml -f compose.rag.yaml up --build -d --wait
+```
+
+The overlay uses the pinned pgvector PostgreSQL 18 image, builds `Dockerfile.rag`,
+runs task and vector schema initialization, and mounts model files read-only.
+Choose a free `REVIEW_API_PORT` in `.env.rag`. The baseline Compose image remains
+available. The model is not embedded in either image or sent to the build context.
+
+### Verification and comparison
+
+```bash
+python -m unittest discover -s tests -p test_repository_chunks.py -v
+python scripts/verify_rag.py
+python scripts/verify_compose.py --rag
+```
+
+For an offline fault-detection audit, run `python scripts/verify_rag.py --probe-guards`.
+It also checks that deliberate truncation, lost index scoping, partial publication,
+trusted cached text, unseen citations and hidden tool errors make the relevant
+tests fail, then reruns the real RAG suite with the original implementation restored.
+Mutations exist only in the test process; production files are not edited.
+
+The second command uses the real CPU model, a fresh randomly named PostgreSQL/
+pgvector container, the API/executor, and dev retrieval comparisons. It uses no
+upstream credentials, removes only its own test container, and saves evidence in
+`reports/review-v45-test-*/`. Download the model and Docker image first. It compares
+token/symbol overlap against vector ranking at k=1/3/5 using queries derived only
+from changed source. Gold evidence is used only after ranking. Full-range recall
+can combine contiguous returned chunks. Small synthetic repositories make larger
+k less discriminating; this is not generated-review accuracy.
+
+`evals/rag-live-plan.example.json` defines a separate, opt-in dev comparison of
+`context` versus `vector` under equal generation/tool budgets. The existing live
+runner and adjudication scorer support both modes. Validate without spending:
+
+```bash
+python -m evals.live --plan evals/rag-live-plan.example.json
+```
+
+For an authorized live experiment, copy the plan to an ignored location, verify
+pricing on the current UTC date, configure the local vector database/model and
+`DEEPSEEK_API_KEY`, then add `--live --output NEW_DIRECTORY`. All 24 planned dev
+records remain in the denominator, including interrupted/unstarted ones. Classify
+findings using the existing adjudication procedure; vector findings also require
+evidence judgments. Historical holdout was already observed and is not a new blind
+test. Failure or a lack of measured benefit keeps vector retrieval optional.
+
+The 2026-10-30 local acceptance run passed 290 core tests (one Windows symlink
+skip), 75 PostgreSQL/API tests, 9 real-model/pgvector tests and 11 RAG Compose
+checks. On the 12 synthetic dev repositories, lexical/vector full-range Recall@3
+was 64.3%/78.6%; Recall@5 was 64.3%/100%. These tiny repositories do not establish
+performance or accuracy on production codebases.
+
+The 2026-10-31 proof audit strengthened the real RAG suite to 11 tests, including
+a PostgreSQL failure during chunk insertion and the production GitHub provider
+through HTTP task submission/replay. GitHub responses and model generation are
+scripted in that offline test; embedding, vector storage, provider construction,
+task execution and persistence are real. This verifies integration, not a live
+model's decision to use retrieval. Long-input tests now verify that changing text
+beyond the first token window changes the vector, rather than only its dimension.
+
+An authorized, AI-adjudicated live comparison completed all 24 records:
+context had 6 true positives, 1 false positive and 0 missed known defects;
+vector-available had 6 true positives, 0 false positives and 0 missed defects.
+The model made **zero `retrieve_code` calls**, so this comparison does not
+demonstrate a final-review benefit from vector retrieval. The real retrieval path
+was exercised separately by the integration and ranking tests. Retrieval remains
+opt-in; independent human adjudication and a production-scale benchmark are still
+unverified. The completed run used 52 generation requests; including an earlier
+interrupted attempt, 66 requests had a combined cost upper bound of $0.0864756
+(not a billed amount). Raw results, explicit judgments and logs remain in ignored
+local `reports/` directories; reproduction requires running the checks above.
 
 ## V4.3 evaluation baseline
 
@@ -202,17 +369,31 @@ failures, evidence validity, duration, calls and cost alongside quality scores.
 
 ## Setup and manual use
 
-Python 3.10+ and Git are required. Actions uses Python 3.11.
-On Windows with Git Bash:
+Git is required. Use the Python versions exercised in CI: Python 3.11 for core
+development, or Python 3.13 for API/RAG development. Reuse an existing `.venv`
+when available. The commands below install core dependencies without activation.
 
-```bash
-python -m venv .venv
-source .venv/Scripts/activate
-python -m pip install -r requirements.txt
+Windows PowerShell (with the Python launcher installed):
+
+```powershell
+py -3.11 -m venv .venv  # Only if absent; use -3.13 for API/RAG development
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip check
 ```
 
-On Linux/macOS, use `source .venv/bin/activate` instead. Without activation,
-Windows Git Bash can run the project interpreter as `./.venv/Scripts/python.exe`.
+POSIX shell (Linux/macOS):
+
+```bash
+python3.11 -m venv .venv  # Only if absent; use python3.13 for API/RAG development
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip check
+```
+
+Install `requirements-api.txt` for API/storage work or `requirements-rag.txt`
+for RAG work in place of `requirements.txt`; they include the core dependencies.
+In subsequent examples, `python` means the virtual environment interpreter above.
+Windows Git Bash can use `./.venv/Scripts/python.exe`. Shell examples marked
+`bash` use Bash syntax, including the credential-file example below.
 
 Mocked tests need no `.env` or API keys. For live
 manual reviews, supply environment variables or create a local `.env`:
@@ -898,19 +1079,24 @@ no new review and requires no GitHub call. The report and redacted Docker log st
 
 ### Continuous integration
 
-`tests.yml` retains the core-only Python 3.11 job and adds two independent jobs:
+`.github/workflows/tests.yml` defines four independent jobs:
 
-- Python 3.13 + a real PostgreSQL 18.6 service runs the isolated database/API
-  suite, frozen dataset validation, and 45 offline mock evaluations.
-- A Docker job builds the image and runs the same offline Compose acceptance.
+| Job | Environment and coverage |
+| --- | --- |
+| `test` | Python 3.11, core dependencies, and the core unittest suite |
+| `api-postgres` | Python 3.13, API dependencies, a real PostgreSQL 18.6 service, isolated database/API tests, frozen dataset validation, and offline mock evaluations |
+| `compose` | Python 3.13 and Docker; builds the base image and runs isolated offline Compose acceptance |
+| `rag` | Python 3.13, RAG dependencies, checksum-pinned local model files and a pinned pgvector image; real embedding/retrieval/API acceptance, fault-detection probes, and RAG Compose acceptance |
 
-These jobs use read-only repository permissions, test-only database credentials,
-blank upstream keys, and no model calls or image publishing. Workflow execution
-on GitHub requires a later user-controlled push; local verification does not
-claim a hosted CI pass. The existing separate PR Review workflow is unchanged:
-it can call the paid model and publish a comment on eligible non-draft PRs when
-its secret is configured. Keep the delivery PR as a draft while only offline CI
-is authorized; marking it ready for review can trigger that workflow.
+These jobs use read-only repository permissions and require no upstream API
+credentials or paid generation calls. Database credentials are test-only; no
+images are published. Dependency, model and image downloads still need network
+access. Local verification does not establish a hosted CI pass for a commit.
+
+The separate PR Review workflow can call the paid model and publish a comment
+on eligible non-draft PRs when its secret is configured. Keep a PR as a draft
+while only offline CI is authorized; marking it ready or updating a non-draft PR
+can trigger that workflow.
 
 ## Architecture
 
@@ -964,6 +1150,60 @@ skipped. `PullRequestRevision` identifies the head/base pair being reviewed.
 
 ## Validation
 
+### Offline validation commands
+
+Run from the repository root using the virtual environment interpreter described
+in [Setup](#setup-and-manual-use). Core tests require no API keys or model calls.
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+If actionlint is installed:
+
+```bash
+actionlint .github/workflows/tests.yml .github/workflows/review.yml
+```
+
+For evaluation or shared review-flow changes, also run:
+
+```bash
+python -m evals.dataset
+python -m evals.runner --split all
+```
+
+Check execution expectations rather than treating injected INCOMPLETE results
+as failures. The core suite does not replace the separate
+[PostgreSQL tests](#dedicated-postgresql-tests),
+[Compose acceptance](#isolated-fully-offline-container-acceptance), or
+[RAG acceptance](#verification-and-comparison). Run the relevant integration
+checks when those components change, with their documented prerequisites.
+
+### Explicit live acceptance
+
+These checks spend model calls and publish GitHub comments. Run them only when
+that scope and budget are authorized; offline tests do not execute them.
+
+After configuring the secret and pushing, verify the live workflow with a small PR:
+
+1. Open a non-draft, same-repository PR. Confirm both workflows run and a summary
+   appears with the current head SHA.
+2. Push another commit. Confirm the same comment is updated and its SHA changes.
+   Re-running the current job should also update that comment.
+3. Push twice while a review is running. Confirm the older run is cancelled or
+   reports that it was superseded, and the final summary identifies the new SHA.
+4. Include an unavailable or oversized patch. Confirm the summary reports
+   **INCOMPLETE** and the review job fails rather than claiming all files passed.
+
+Mocked tests do not validate a real API key, Actions policies, or live model
+behavior. The live checks above are the deployment acceptance step.
+
+### Historical V4.2 verification
+
+The following records describe the V4.2 implementation and runs at that time.
+Dates, counts and pending acceptance statements are historical, not the current
+branch's CI status or a guarantee about later changes.
+
 Validation on 2026-10-20: the initial Python Tests workflow passed in Ubuntu Actions.
 After the Actions failure investigation, 179 tests ran locally: 178 passed and
 one Windows symlink-permission test was skipped. New regressions cover the last
@@ -985,30 +1225,6 @@ output failures was blocked by two model connection errors and one GitHub API
 error. It completed 0/3 and does not establish the final repair's live coverage.
 These separate runs cannot be combined into a full-PR pass. Original logs and
 diagnostics remain local in `experiments/`; hosted acceptance is still pending.
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-If actionlint is installed:
-
-```bash
-actionlint .github/workflows/tests.yml .github/workflows/review.yml
-```
-
-After configuring the secret and pushing, verify the live workflow with a small PR:
-
-1. Open a non-draft, same-repository PR. Confirm both workflows run and a summary
-   appears with the current head SHA.
-2. Push another commit. Confirm the same comment is updated and its SHA changes.
-   Re-running the current job should also update that comment.
-3. Push twice while a review is running. Confirm the older run is cancelled or
-   reports that it was superseded, and the final summary identifies the new SHA.
-4. Include an unavailable or oversized patch. Confirm the summary reports
-   **INCOMPLETE** and the review job fails rather than claiming all files passed.
-
-Mocked tests do not validate a real API key, Actions policies, or live model
-behavior. The live checks above are the deployment acceptance step.
 
 ## Limitations and roadmap
 
@@ -1047,7 +1263,10 @@ Roadmap:
   repository restrictions, immutable GitHub reads, and lifecycle integration
 - V4.4.5 (implemented): Docker/Compose, migration and health gates, persistent
   database volume, isolated container acceptance, and offline CI jobs
-- V4.4.6 (planned): Stage acceptance and separately authorized live demonstration
+- V4.4.6 (accepted): API lifecycle and bounded live demonstration; the live review
+  remained incomplete after exhausting its input budget
+- V4.5: Version-bound Python chunks, local CPU embeddings, exact pgvector search,
+  optional budgeted retrieval, persisted provenance and dev comparison tooling
 - V5 (planned): Durable queues, independent workers, recovery, and deployment scaling
 
 ## Files to commit

@@ -25,6 +25,7 @@ class Settings(BaseModel):
     model_timeout: float = Field(default=45, gt=0, le=60, allow_inf_nan=False)
     max_output_tokens: int = Field(default=16384, ge=1, le=16384)
     shutdown_grace: float = Field(default=10, ge=0, le=60, allow_inf_nan=False)
+    rag_model_dir: str | None = None
 
     @model_validator(mode='before')
     @classmethod
@@ -61,6 +62,10 @@ class Settings(BaseModel):
                     raise ValueError('Profile exceeds server hard limits')
             if config.model_mode != self.model_mode:
                 raise ValueError('Profiles must use the server model mode')
+            if config.retrieval_mode == 'vector':
+                from rag_embedding import LocalEmbedder
+                if not self.rag_model_dir or config.embedding_id != LocalEmbedder.spec.key:
+                    raise ValueError('Vector profile requires a model directory and matching embedding identity')
         if self.model_mode == 'live' and not self.model_key.get_secret_value().strip():
             raise ValueError('Live mode requires a server model key')
         return self
@@ -82,7 +87,8 @@ class Settings(BaseModel):
                 github_timeout=os.getenv('REVIEW_GITHUB_TIMEOUT', '10'),
                 model_timeout=os.getenv('REVIEW_MODEL_TIMEOUT', '45'),
                 max_output_tokens=os.getenv('REVIEW_MAX_OUTPUT_TOKENS', '16384'),
-                shutdown_grace=os.getenv('REVIEW_SHUTDOWN_GRACE', '10'))
+                shutdown_grace=os.getenv('REVIEW_SHUTDOWN_GRACE', '10'),
+                rag_model_dir=os.getenv('REVIEW_RAG_MODEL_DIR') or None)
         except Exception:
             # Validation errors can echo secret inputs. Startup errors must not.
             raise ValueError('Invalid review API configuration; check server environment') from None

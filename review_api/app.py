@@ -27,7 +27,7 @@ def create_app(settings=None, *, engine=None, provider=None, mock_request_fn=moc
         state = app.state
         state.engine = engine if engine is not None else create_database_engine(settings.database_url.get_secret_value())
         state.repository = ReviewRepository(session_factory(state.engine), waiting_limit=settings.waiting_limit)
-        state.provider = provider if provider is not None else GitHubProvider(settings)
+        state.provider = provider if provider is not None else GitHubProvider(settings, rag_engine=state.engine)
         state.prompt_id, state.source_id = code_identifiers()
         state.executor = ReviewExecutor(state.engine, state.provider.prepare, repository=state.repository,
             shutdown_grace=settings.shutdown_grace, mock_request_fn=mock_request_fn,

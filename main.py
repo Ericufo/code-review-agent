@@ -1,6 +1,7 @@
 import sys
 import argparse
 import json
+import os
 
 from dotenv import load_dotenv
 
@@ -47,9 +48,11 @@ def parse_args():
     )
     parser.add_argument(
         "--context", choices=("diff", "repo"), default="diff",
-        help="V4.2: enable bounded repository tools with repo (default: diff-only)",
+        help="Enable bounded repository tools with repo (default: diff-only)",
     )
     defaults = ContextBudget()
+    parser.add_argument('--retrieval', choices=('literal', 'vector'), default='literal',
+                        help='Optional local embedding + pgvector retrieval; requires --context repo')
     parser.add_argument('--paths', nargs='+', help='Local only: review these exact Git paths; context may include other source files')
     parser.add_argument('--no-publish', action='store_true', help='PR only: review without creating or updating a comment')
     for option in CONTEXT_BUDGET_OPTIONS:
@@ -57,6 +60,8 @@ def parse_args():
             help=f"Batch {option[4:].replace('_', ' ')} budget for --context repo (default: {getattr(defaults, option)})")
 
     args = parser.parse_args()
+    if args.retrieval == 'vector' and args.context != 'repo':
+        parser.error('--retrieval vector requires --context repo')
     if args.paths is not None and args.github_pr is not None:
         parser.error('--paths is local-only; a partial selection must not appear as a full PR review')
     if args.no_publish and args.github_pr is None:
@@ -143,7 +148,13 @@ def main() -> int:
     load_dotenv()
     args = parse_args()
     client = None
+    rag_engine = None
+    embedding_id = None
+    if args.retrieval == 'vector':
+        from rag_embedding import LocalEmbedder
+        embedding_id = LocalEmbedder.spec.key
     config = ReviewConfig(engine=args.engine, context_mode=args.context,
+        retrieval_mode=args.retrieval, embedding_id=embedding_id,
         **{key: getattr(args, key) for key in CONTEXT_BUDGET_OPTIONS})
 
     try:
@@ -180,7 +191,20 @@ def main() -> int:
         print("No changes to review.")
         return 0
 
-    print("=== Code Review Agent V4.2 ===")
+    if args.retrieval == 'vector' and context is not None:
+        try:
+            from rag_embedding import LocalEmbedder, DEFAULT_MODEL_DIR
+            from repository_rag import RepositoryRetriever, VectorStore
+            from review_api.db import create_database_engine
+            rag_engine = create_database_engine(os.getenv('REVIEW_RAG_DATABASE_URL', ''))
+            embedder = LocalEmbedder(os.getenv('REVIEW_RAG_MODEL_DIR') or DEFAULT_MODEL_DIR)
+            context.retriever = RepositoryRetriever(context, embedder, VectorStore(rag_engine))
+        except Exception:
+            if rag_engine is not None:
+                rag_engine.dispose()
+            print('RAG initialization failed; check optional dependencies, model and database configuration.', file=sys.stderr)
+            return 1
+    print("=== Code Review Agent ===")
     print(f"Review engine: {args.engine}")
     print(f"Context mode: {args.context}")
     if context is not None:
@@ -213,6 +237,9 @@ def main() -> int:
     except Exception as exc:
         print(f"Review failed: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if rag_engine is not None:
+            rag_engine.dispose()
 
     print_review(batch)
 

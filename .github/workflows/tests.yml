@@ -90,3 +90,33 @@ jobs:
           python-version: "3.13"
       - name: Build and verify isolated offline Compose deployment
         run: python scripts/verify_compose.py
+
+  rag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GITHUB_TOKEN: ""
+      DEEPSEEK_API_KEY: ""
+      REVIEW_MODEL_MODE: mock
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-api.txt
+            requirements-rag.txt
+      - name: Install CPU retrieval dependencies
+        run: |
+          python -m pip install -r requirements-rag.txt
+          python -m pip check
+      - name: Download checksum-pinned model and database image
+        run: |
+          python scripts/download_embedding.py
+          docker pull pgvector/pgvector@sha256:9d9c930220cb9bf2f956d10a8f909cf9973d9672ca0278aef2c1e6facccad2e0
+      - name: Real local embeddings, pgvector and API acceptance
+        run: python scripts/verify_rag.py --probe-guards
+      - name: Verify optional RAG container deployment
+        run: python scripts/verify_compose.py --rag

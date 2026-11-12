@@ -17,14 +17,22 @@ def configure_database():
 
 def main():
     role = sys.argv[1] if len(sys.argv) == 2 else ''
-    if role not in {'api', 'migrate'}:
-        raise SystemExit('Expected api or migrate')
+    if role not in {'api', 'migrate', 'migrate-rag'}:
+        raise SystemExit('Expected api, migrate or migrate-rag')
     try:
         configure_database()
-        if role == 'migrate':
+        if role in {'migrate', 'migrate-rag'}:
             from alembic import command
             from review_api.db import migration_config
             command.upgrade(migration_config(), 'head')
+            if role == 'migrate-rag':
+                from review_api.db import create_database_engine
+                from repository_rag import VectorStore
+                engine = create_database_engine(os.environ['DATABASE_URL'])
+                try:
+                    VectorStore(engine).initialize()
+                finally:
+                    engine.dispose()
             print('Database migration completed', flush=True)
             return
         from review_api.settings import Settings
