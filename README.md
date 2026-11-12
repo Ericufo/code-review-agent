@@ -1,10 +1,15 @@
 # Code Review Agent
 
-A Python tool that reviews local Git changes and GitHub pull requests with an
-LLM. V4.2 adds opt-in, bounded repository tools to V4.1's LangGraph workflow.
-Models can read source lines and search code at a pinned revision; findings cite
-validated context evidence. The local CLI defaults to diff-only; the PR Review
-workflow explicitly enables repository context.
+A Python tool for LLM-assisted review of local Git changes and GitHub pull requests.
+It provides a bounded LangGraph workflow, revision-pinned repository context,
+frozen evaluation fixtures, a FastAPI task API with PostgreSQL persistence, and
+optional local vector retrieval. Findings cite validated context evidence when
+repository tools are enabled. The local CLI defaults to diff-only; the PR Review
+workflow enables repository context. Vector retrieval remains opt-in.
+
+Quick links: [Setup](#setup-and-manual-use) · [PR reviews](#automatic-pr-reviews) ·
+[HTTP API](#http-task-api-v444) · [Local RAG](#v45-optional-local-code-retrieval) ·
+[Validation](#validation) · [Architecture](#architecture).
 
 ## Features
 
@@ -364,17 +369,31 @@ failures, evidence validity, duration, calls and cost alongside quality scores.
 
 ## Setup and manual use
 
-Python 3.10+ and Git are required. Actions uses Python 3.11.
-On Windows with Git Bash:
+Git is required. Use the Python versions exercised in CI: Python 3.11 for core
+development, or Python 3.13 for API/RAG development. Reuse an existing `.venv`
+when available. The commands below install core dependencies without activation.
 
-```bash
-python -m venv .venv
-source .venv/Scripts/activate
-python -m pip install -r requirements.txt
+Windows PowerShell (with the Python launcher installed):
+
+```powershell
+py -3.11 -m venv .venv  # Only if absent; use -3.13 for API/RAG development
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip check
 ```
 
-On Linux/macOS, use `source .venv/bin/activate` instead. Without activation,
-Windows Git Bash can run the project interpreter as `./.venv/Scripts/python.exe`.
+POSIX shell (Linux/macOS):
+
+```bash
+python3.11 -m venv .venv  # Only if absent; use python3.13 for API/RAG development
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip check
+```
+
+Install `requirements-api.txt` for API/storage work or `requirements-rag.txt`
+for RAG work in place of `requirements.txt`; they include the core dependencies.
+In subsequent examples, `python` means the virtual environment interpreter above.
+Windows Git Bash can use `./.venv/Scripts/python.exe`. Shell examples marked
+`bash` use Bash syntax, including the credential-file example below.
 
 Mocked tests need no `.env` or API keys. For live
 manual reviews, supply environment variables or create a local `.env`:
@@ -1060,19 +1079,24 @@ no new review and requires no GitHub call. The report and redacted Docker log st
 
 ### Continuous integration
 
-`tests.yml` retains the core-only Python 3.11 job and adds two independent jobs:
+`.github/workflows/tests.yml` defines four independent jobs:
 
-- Python 3.13 + a real PostgreSQL 18.6 service runs the isolated database/API
-  suite, frozen dataset validation, and 45 offline mock evaluations.
-- A Docker job builds the image and runs the same offline Compose acceptance.
+| Job | Environment and coverage |
+| --- | --- |
+| `test` | Python 3.11, core dependencies, and the core unittest suite |
+| `api-postgres` | Python 3.13, API dependencies, a real PostgreSQL 18.6 service, isolated database/API tests, frozen dataset validation, and offline mock evaluations |
+| `compose` | Python 3.13 and Docker; builds the base image and runs isolated offline Compose acceptance |
+| `rag` | Python 3.13, RAG dependencies, checksum-pinned local model files and a pinned pgvector image; real embedding/retrieval/API acceptance, fault-detection probes, and RAG Compose acceptance |
 
-These jobs use read-only repository permissions, test-only database credentials,
-blank upstream keys, and no model calls or image publishing. Workflow execution
-on GitHub requires a later user-controlled push; local verification does not
-claim a hosted CI pass. The existing separate PR Review workflow is unchanged:
-it can call the paid model and publish a comment on eligible non-draft PRs when
-its secret is configured. Keep the delivery PR as a draft while only offline CI
-is authorized; marking it ready for review can trigger that workflow.
+These jobs use read-only repository permissions and require no upstream API
+credentials or paid generation calls. Database credentials are test-only; no
+images are published. Dependency, model and image downloads still need network
+access. Local verification does not establish a hosted CI pass for a commit.
+
+The separate PR Review workflow can call the paid model and publish a comment
+on eligible non-draft PRs when its secret is configured. Keep a PR as a draft
+while only offline CI is authorized; marking it ready or updating a non-draft PR
+can trigger that workflow.
 
 ## Architecture
 
@@ -1126,6 +1150,60 @@ skipped. `PullRequestRevision` identifies the head/base pair being reviewed.
 
 ## Validation
 
+### Offline validation commands
+
+Run from the repository root using the virtual environment interpreter described
+in [Setup](#setup-and-manual-use). Core tests require no API keys or model calls.
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+If actionlint is installed:
+
+```bash
+actionlint .github/workflows/tests.yml .github/workflows/review.yml
+```
+
+For evaluation or shared review-flow changes, also run:
+
+```bash
+python -m evals.dataset
+python -m evals.runner --split all
+```
+
+Check execution expectations rather than treating injected INCOMPLETE results
+as failures. The core suite does not replace the separate
+[PostgreSQL tests](#dedicated-postgresql-tests),
+[Compose acceptance](#isolated-fully-offline-container-acceptance), or
+[RAG acceptance](#verification-and-comparison). Run the relevant integration
+checks when those components change, with their documented prerequisites.
+
+### Explicit live acceptance
+
+These checks spend model calls and publish GitHub comments. Run them only when
+that scope and budget are authorized; offline tests do not execute them.
+
+After configuring the secret and pushing, verify the live workflow with a small PR:
+
+1. Open a non-draft, same-repository PR. Confirm both workflows run and a summary
+   appears with the current head SHA.
+2. Push another commit. Confirm the same comment is updated and its SHA changes.
+   Re-running the current job should also update that comment.
+3. Push twice while a review is running. Confirm the older run is cancelled or
+   reports that it was superseded, and the final summary identifies the new SHA.
+4. Include an unavailable or oversized patch. Confirm the summary reports
+   **INCOMPLETE** and the review job fails rather than claiming all files passed.
+
+Mocked tests do not validate a real API key, Actions policies, or live model
+behavior. The live checks above are the deployment acceptance step.
+
+### Historical V4.2 verification
+
+The following records describe the V4.2 implementation and runs at that time.
+Dates, counts and pending acceptance statements are historical, not the current
+branch's CI status or a guarantee about later changes.
+
 Validation on 2026-10-20: the initial Python Tests workflow passed in Ubuntu Actions.
 After the Actions failure investigation, 179 tests ran locally: 178 passed and
 one Windows symlink-permission test was skipped. New regressions cover the last
@@ -1147,30 +1225,6 @@ output failures was blocked by two model connection errors and one GitHub API
 error. It completed 0/3 and does not establish the final repair's live coverage.
 These separate runs cannot be combined into a full-PR pass. Original logs and
 diagnostics remain local in `experiments/`; hosted acceptance is still pending.
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-If actionlint is installed:
-
-```bash
-actionlint .github/workflows/tests.yml .github/workflows/review.yml
-```
-
-After configuring the secret and pushing, verify the live workflow with a small PR:
-
-1. Open a non-draft, same-repository PR. Confirm both workflows run and a summary
-   appears with the current head SHA.
-2. Push another commit. Confirm the same comment is updated and its SHA changes.
-   Re-running the current job should also update that comment.
-3. Push twice while a review is running. Confirm the older run is cancelled or
-   reports that it was superseded, and the final summary identifies the new SHA.
-4. Include an unavailable or oversized patch. Confirm the summary reports
-   **INCOMPLETE** and the review job fails rather than claiming all files passed.
-
-Mocked tests do not validate a real API key, Actions policies, or live model
-behavior. The live checks above are the deployment acceptance step.
 
 ## Limitations and roadmap
 

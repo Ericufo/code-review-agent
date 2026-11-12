@@ -48,7 +48,7 @@ def parse_args():
     )
     parser.add_argument(
         "--context", choices=("diff", "repo"), default="diff",
-        help="V4.2: enable bounded repository tools with repo (default: diff-only)",
+        help="Enable bounded repository tools with repo (default: diff-only)",
     )
     defaults = ContextBudget()
     parser.add_argument('--retrieval', choices=('literal', 'vector'), default='literal',
@@ -204,7 +204,7 @@ def main() -> int:
                 rag_engine.dispose()
             print('RAG initialization failed; check optional dependencies, model and database configuration.', file=sys.stderr)
             return 1
-    print("=== Code Review Agent V4.2 ===")
+    print("=== Code Review Agent ===")
     print(f"Review engine: {args.engine}")
     print(f"Context mode: {args.context}")
     if context is not None:

@@ -18,12 +18,23 @@ FastAPI 任务 API 和可选本地向量检索。安装、使用与部署细节�
 
 从仓库根目录执行命令，优先复用 `.venv`。以下命令中的 `python` 指虚拟环境解释器；
 Windows PowerShell 可用 `.\.venv\Scripts\python.exe`，Linux/macOS 可用 `.venv/bin/python`。
-核心 CI 使用 Python 3.11，API/RAG CI 使用 Python 3.13；修改核心代码时保持 3.11 兼容。
+按 CI 验证环境，核心开发推荐 Python 3.11，API/RAG 开发推荐 Python 3.13；
+修改核心代码时保持 3.11 兼容。以下安装命令直接使用虚拟环境解释器，无需激活。
+
+Windows PowerShell：
+
+```powershell
+py -3.11 -m venv .venv  # 仅在尚无虚拟环境时；API/RAG 使用 -3.13
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip check
+```
+
+POSIX shell（Linux/macOS）：
 
 ```sh
-python -m venv .venv                       # 仅在尚无虚拟环境时
-python -m pip install -r requirements.txt  # 激活环境后安装核心依赖
-python -m pip check
+python3.11 -m venv .venv  # 仅在尚无虚拟环境时；API/RAG 使用 python3.13
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip check
 ```
 
 - API/数据库开发安装 `requirements-api.txt`，它包含核心依赖。
