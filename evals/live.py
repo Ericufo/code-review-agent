@@ -385,17 +385,24 @@ def main(argv=None):
     engine, factory, retrieval_config = None, None, None
     try:
         if 'vector' in plan.mode_order:
-            from dataclasses import asdict
-            from rag_embedding import LocalEmbedder, DEFAULT_MODEL_DIR
-            from repository_rag import RepositoryRetriever, VectorStore, RAG_CHUNKS
-            from review_api.db import create_database_engine
-            embedder = LocalEmbedder(os.getenv('REVIEW_RAG_MODEL_DIR') or DEFAULT_MODEL_DIR)
-            engine = create_database_engine(os.environ['REVIEW_RAG_DATABASE_URL'])
-            store = VectorStore(engine)
-            store.initialize()
-            factory = lambda context: RepositoryRetriever(context, embedder, store)
-            retrieval_config = {'embedding': asdict(embedder.spec), 'chunks': asdict(RAG_CHUNKS),
-                'chunker': RAG_CHUNKS.version, 'source_hash': code_version()['source_hash']}
+            # Optional dependencies and database/model setup have their own error
+            # boundary; do not hide errors from the subsequent evaluation run.
+            try:
+                database_url = os.environ['REVIEW_RAG_DATABASE_URL']
+                from dataclasses import asdict
+                from rag_embedding import LocalEmbedder, DEFAULT_MODEL_DIR
+                from repository_rag import RepositoryRetriever, VectorStore, RAG_CHUNKS
+                from review_api.db import create_database_engine
+                embedder = LocalEmbedder(os.getenv('REVIEW_RAG_MODEL_DIR') or DEFAULT_MODEL_DIR)
+                engine = create_database_engine(database_url)
+                store = VectorStore(engine)
+                store.initialize()
+                factory = lambda context: RepositoryRetriever(context, embedder, store)
+                retrieval_config = {'embedding': asdict(embedder.spec), 'chunks': asdict(RAG_CHUNKS),
+                    'chunker': RAG_CHUNKS.version, 'source_hash': code_version()['source_hash']}
+            except Exception:
+                parser.exit(2, 'RAG initialization failed; check optional dependencies, model files and '
+                            'REVIEW_RAG_DATABASE_URL. No generation request was sent.\n')
         from openai import OpenAI
         with OpenAI(api_key=key, base_url=plan.base_url, timeout=plan.timeout_seconds, max_retries=0) as client:
             artifact = run_live(plan, output=output, create=client.responses.create,

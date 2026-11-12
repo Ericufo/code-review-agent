@@ -187,6 +187,10 @@ def main() -> int:
         return 1
 
     file_diffs, context = prepared.files, prepared.context
+    if not file_diffs and client is None:
+        print("No changes to review.")
+        return 0
+
     if args.retrieval == 'vector' and context is not None:
         try:
             from rag_embedding import LocalEmbedder, DEFAULT_MODEL_DIR
@@ -200,10 +204,6 @@ def main() -> int:
                 rag_engine.dispose()
             print('RAG initialization failed; check optional dependencies, model and database configuration.', file=sys.stderr)
             return 1
-    if not file_diffs and client is None:
-        print("No changes to review.")
-        return 0
-
     print("=== Code Review Agent V4.2 ===")
     print(f"Review engine: {args.engine}")
     print(f"Context mode: {args.context}")

@@ -1,6 +1,10 @@
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 import json
+import contextlib
+import io
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 import tempfile
 import unittest
@@ -29,6 +33,40 @@ def response(text=None, usage=True):
 
 
 class TestEvalLive(unittest.TestCase):
+    def test_vector_setup_failures_exit_cleanly_before_generation(self):
+        from repository_context import ContextError
+        for failure in ('configuration', 'dependency', 'model', 'database'):
+            with self.subTest(failure=failure):
+                engine = Mock()
+                store = Mock()
+                modules = {
+                    'repository_rag': SimpleNamespace(RepositoryRetriever=Mock(),
+                        VectorStore=store, RAG_CHUNKS=Mock()),
+                    'review_api.db': SimpleNamespace(create_database_engine=Mock(return_value=engine)),
+                }
+                env = {'DEEPSEEK_API_KEY': 'offline-test-key'}
+                if failure != 'configuration':
+                    env['REVIEW_RAG_DATABASE_URL'] = 'postgresql+psycopg://test:secret@localhost/test'
+                if failure == 'dependency':
+                    modules['repository_rag'] = None
+                if failure == 'database':
+                    store.return_value.initialize.side_effect = RuntimeError('secret database details')
+                stderr = io.StringIO()
+                with patch.dict(os.environ, env, clear=True), patch.dict(sys.modules, modules), \
+                     patch.object(Path, 'read_text', return_value=plan(mode_order=['context', 'vector']).model_dump_json()), \
+                     patch('evals.live.selected_cases', return_value=[]), \
+                     patch('rag_embedding.LocalEmbedder.__init__', return_value=None,
+                         side_effect=ContextError('secret model details') if failure == 'model' else None), \
+                     patch('openai.OpenAI') as client, contextlib.redirect_stderr(stderr), \
+                     self.assertRaises(SystemExit) as raised:
+                    main(['--plan', 'unused.json', '--live'])
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn('RAG initialization failed', stderr.getvalue())
+                self.assertNotIn('secret', stderr.getvalue())
+                client.assert_not_called()
+                if failure == 'database':
+                    engine.dispose.assert_called_once()
+
     @unittest.skipUnless(os.name == 'nt', 'Windows file-sharing semantics')
     def test_checkpoint_survives_a_real_reader_holding_the_target(self):
         from evals.live import write_json
